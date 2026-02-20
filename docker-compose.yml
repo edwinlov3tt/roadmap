@@ -1,0 +1,49 @@
+services:
+  roadmap-backend:
+    build: ./backend
+    ports:
+      - "3002:3002"
+    environment:
+      PORT: 3002
+      ANTHROPIC_API_KEY: ""
+      API_TOKEN: a4b494fc27a887b52ba11a5c72ac7446ffbc6bd1a9a6815941839edbb709d13e
+      DB_HOST: fider-db-1
+      DB_USER: fider
+      DB_PASSWORD: t1WEn72Z0+2P8JN5dqtoPHj2nUSMsuCs
+      DB_NAME: fider
+      DB_PORT: 5432
+    volumes:
+      # Mount only uploads directory to persist uploaded files
+      - ./backend/uploads:/app/uploads
+      # Don't mount entire backend to avoid node_modules conflicts
+    networks:
+      - roadmap-network
+      - fider_fider-network
+    depends_on: []
+    restart: unless-stopped
+
+  roadmap-frontend:
+    build: ./frontend
+    ports:
+      - "3003:80"
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html
+    networks:
+      - roadmap-network
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: fider
+      POSTGRES_PASSWORD: t1WEn72Z0+2P8JN5dqtoPHj2nUSMsuCs
+      POSTGRES_DB: fider
+    networks:
+      - roadmap-network
+      - fider_fider-network
+
+networks:
+  roadmap-network:
+    driver: bridge
+  fider_fider-network:
+    external: true

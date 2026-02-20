@@ -1,0 +1,276 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Brand colors */
+    --accent: #CF0E0F;
+    --accent-rgb: 207, 14, 15;
+
+    /* Base backgrounds */
+    --bg: #1D1D21;
+    --e1: #252529;
+    --e2: #2D2D32;
+    --e3: #35353B;
+
+    /* Text colors */
+    --hi: #F7F8FA;
+    --muted: #C7CBD1;
+    --subtle: #8B91A0;
+
+    /* Strokes */
+    --stroke: #35353B;
+    --stroke-inner: rgba(255, 255, 255, 0.08);
+
+    /* Semantic */
+    --success: #21C37A;
+    --warn: #F6C244;
+    --danger: #FF5C5C;
+    --info: #5AA2FF;
+
+    /* Scroll padding to avoid header overlap */
+    scroll-padding-top: 24px;
+  }
+
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html {
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-base text-text-hi;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    min-height: 100vh;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-elevation-1;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-elevation-3 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-stroke-outer;
+  }
+
+  /* Focus styles */
+  :focus-visible {
+    outline: 2px solid rgba(207, 14, 15, 0.4);
+    outline-offset: 2px;
+  }
+
+  /* Reduced motion accessibility */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+
+    /* Preserve instant feedback for interactive elements */
+    button, input, select, textarea {
+      transition-duration: 0s !important;
+    }
+
+    /* Disable transform animations that could be disorienting */
+    .hover\\:translate-x-0\\.5:hover,
+    .hover\\:-translate-y-0\\.5:hover,
+    .hover\\:-translate-y-1:hover {
+      transform: none !important;
+    }
+
+    /* Disable scale animations */
+    .active\\:scale-\\[0\\.98\\]:active {
+      transform: none !important;
+    }
+
+    /* Disable spinning animations */
+    .animate-spin {
+      animation: none !important;
+    }
+  }
+}
+
+@layer components {
+  /* Glass Panel */
+  .glass-panel {
+    @apply rounded-md backdrop-blur-md;
+    background: rgba(37, 37, 41, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  }
+
+  .glass-panel-hover {
+    @apply transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xl;
+  }
+
+  /* Status Pills */
+  .status-pill {
+    @apply inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-sm;
+    @apply bg-white/5 border border-white/10;
+  }
+
+  .status-dot {
+    @apply size-2.5 rounded-full;
+    filter: drop-shadow(0 0 4px currentColor);
+  }
+
+  /* Button variants */
+  .btn-primary {
+    @apply px-4 py-2 rounded-sm bg-accent text-white font-medium;
+    @apply hover:bg-red-700 active:scale-[0.98] transition-all duration-150;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 rounded-sm glass-panel text-text-muted font-medium;
+    @apply hover:text-text-hi hover:bg-white/5 active:scale-[0.98] transition-all duration-150;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply px-4 py-2 rounded-sm text-text-muted font-medium;
+    @apply hover:text-text-hi hover:bg-white/5 active:scale-[0.98] transition-all duration-150;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* KPI Chip */
+  .kpi-chip {
+    @apply glass-panel px-4 py-3 flex flex-col gap-2;
+  }
+
+  .kpi-value {
+    @apply text-h3 font-semibold text-text-hi;
+  }
+
+  .kpi-label {
+    @apply text-micro uppercase tracking-wider text-text-subtle;
+  }
+
+  /* Loading skeleton */
+  .skeleton {
+    @apply animate-shimmer bg-gradient-to-r from-elevation-2 via-elevation-3 to-elevation-2;
+    background-size: 200% 100%;
+  }
+
+  /* Card hover lift */
+  .card-lift {
+    @apply transition-all duration-200 hover:-translate-y-1 hover:shadow-xl;
+  }
+
+  /* Glassmorphic input */
+  .input-glass {
+    @apply w-full px-4 py-2 rounded-sm glass-panel;
+    @apply text-text-hi placeholder-text-subtle;
+    @apply focus:outline-none focus:ring-2 focus:ring-accent/40;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* Project status colors */
+  .status-live {
+    @apply text-success;
+  }
+
+  .status-beta {
+    @apply text-info;
+  }
+
+  .status-dev {
+    @apply text-warn;
+  }
+
+  .status-paused {
+    @apply text-danger;
+  }
+
+  /* Timeline rail */
+  .timeline-rail {
+    @apply relative w-0.5 bg-elevation-3;
+  }
+
+  .timeline-node {
+    @apply absolute size-4 rounded-full border-2 border-elevation-3 bg-elevation-1;
+    @apply -left-[7px];
+  }
+
+  .timeline-node-active {
+    @apply bg-accent border-accent animate-pulse-subtle;
+    box-shadow: 0 0 12px var(--accent);
+  }
+
+  .timeline-node-complete {
+    @apply bg-success border-success;
+  }
+
+  /* Blocker chip */
+  .blocker-chip {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-sm;
+    @apply bg-danger/10 border border-danger/20 text-danger;
+    @apply font-medium text-sm;
+  }
+
+  /* Media card overlay */
+  .media-overlay {
+    @apply absolute inset-0 bg-gradient-to-t from-black/60 to-transparent;
+    @apply opacity-0 hover:opacity-100 transition-opacity duration-200;
+  }
+
+  /* Line clamping utilities */
+  .line-clamp-1 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+  }
+
+  .line-clamp-2 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .line-clamp-3 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+  }
+
+  /* Custom scrollbar for columns */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-white/10 rounded-full;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-white/20;
+  }
+}

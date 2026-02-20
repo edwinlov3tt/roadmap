@@ -1,0 +1,717 @@
+const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+const axios = require('axios');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+require('dotenv').config();
+
+const app = express();
+const port = process.env.PORT || 3005;
+
+// Database connection to PostgreSQL (SiteGround)
+const pool = new Pool({
+  user: process.env.DB_USER || 'uetbqgefcnwi5',
+  host: process.env.DB_HOST || '34.174.127.137',
+  database: process.env.DB_NAME || 'dbbnn75bg37j62',
+  password: process.env.DB_PASSWORD || 'ghgtbwlqmdra',
+  port: process.env.DB_PORT || 5432,
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
+
+app.use(cors());
+app.use(express.json());
+
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static(uploadsDir));
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadsDir)
+  },
+  filename: function (req, file, cb) {
+    // Generate unique filename
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
+    cb(null, uniqueSuffix + path.extname(file.originalname))
+  }
+})
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+  fileFilter: function (req, file, cb) {
+    // Check if the file is an image
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true)
+    } else {
+      cb(new Error('Only image files are allowed!'), false)
+    }
+  }
+})
+
+// Add request logging middleware
+app.use((req, res, next) => {
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
+  }
+  next();
+});
+
+// Database connection with retry logic
+const connectWithRetry = async (retries = 5) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const client = await pool.connect();
+      await client.query('SELECT NOW()');
+      client.release();
+      console.log('Connected to database successfully');
+      return;
+    } catch (err) {
+      console.error(`Database connection attempt ${i + 1} failed:`, err.message);
+      if (i === retries - 1) {
+        console.error('All database connection attempts failed');
+        process.exit(1);
+      }
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+  }
+};
+
+// Initialize database connection
+connectWithRetry();
+
+// Health check endpoint
+app.get('/health', async (req, res) => {
+  try {
+    const client = await pool.connect();
+    await client.query('SELECT 1');
+    client.release();
+    res.status(200).json({ status: 'healthy', database: 'connected' });
+  } catch (error) {
+    res.status(503).json({ status: 'unhealthy', database: 'disconnected', error: error.message });
+  }
+});
+
+// Simple admin auth middleware
+const adminAuth = (req, res, next) => {
+  const email = req.headers['x-admin-email'];
+  if (email === 'edwin@edwinlovett.com') {
+    next();
+  } else {
+    res.status(401).json({ error: 'Unauthorized' });
+  }
+};
+
+// Helper function to generate slug from name
+const generateSlug = (name) => {
+  return name.toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .substring(0, 100);
+};
+
+// AI-powered note cleaning using Claude API
+const cleanNotesWithAI = async (notes) => {
+  try {
+    // Processing notes with AI
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 500,
+      messages: [{
+        role: 'user',
+        content: `Clean up and organize these project notes into clear, concise bullet points. Make them professional and actionable. Remove any redundancy and structure them logically:
+
+"${notes}"
+
+Respond ONLY with a JSON array of strings, where each string is a bullet point (without bullet symbols). Do not include any other text or formatting.`
+      }]
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      }
+    });
+
+    const responseText = response.data.content[0].text;
+    const cleanedResponse = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    
+    // Try to parse as JSON
+    try {
+      const bulletPoints = JSON.parse(cleanedResponse);
+      return Array.isArray(bulletPoints) ? bulletPoints : [notes];
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError);
+      console.error('Failed to parse:', cleanedResponse);
+      // If JSON parsing fails, try to extract array-like content
+      const lines = cleanedResponse.split('\n').filter(line => line.trim());
+      return lines.length > 0 ? lines : [notes];
+    }
+  } catch (error) {
+    console.error('Error processing notes with AI:', error);
+    // Fallback: split by newlines and clean up
+    return notes.split('\n').filter(line => line.trim()).map(line => line.trim());
+  }
+};
+
+// Create changelog tables if they don't exist
+const initTables = async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS changelog_projects (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(255) UNIQUE,
+        current_version VARCHAR(50) NOT NULL,
+        next_steps TEXT,
+        launched_date VARCHAR(100),
+        project_url VARCHAR(500),
+        fider_tag_id INTEGER,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        description TEXT,
+        status VARCHAR(50) DEFAULT 'In Development',
+        last_updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Add new columns if they don't exist
+    const alterQueries = [
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS slug VARCHAR(255) UNIQUE`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS description TEXT`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'In Development'`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS last_updated_at TIMESTAMP DEFAULT NOW()`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS project_url VARCHAR(500)`
+    ];
+
+    for (const query of alterQueries) {
+      try {
+        await pool.query(query);
+      } catch (error) {
+        // Column already exists or error adding: handled
+      }
+    }
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS changelog_updates (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER REFERENCES changelog_projects(id) ON DELETE CASCADE,
+        status VARCHAR(50) NOT NULL,
+        notes JSONB NOT NULL,
+        raw_notes TEXT,
+        fider_post_id INTEGER,
+        created_at TIMESTAMP DEFAULT NOW(),
+        update_date TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Add update_date column if it doesn't exist
+    try {
+      await pool.query(`
+        ALTER TABLE changelog_updates
+        ADD COLUMN IF NOT EXISTS update_date TIMESTAMP DEFAULT NOW()
+      `);
+    } catch (error) {
+      // Column already exists: handled
+    }
+
+    // Create new tables for enhanced features
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_images (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER REFERENCES changelog_projects(id) ON DELETE CASCADE,
+        src VARCHAR(500) NOT NULL,
+        alt VARCHAR(255),
+        sort_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_next_steps (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER REFERENCES changelog_projects(id) ON DELETE CASCADE,
+        title VARCHAR(500) NOT NULL,
+        blocking BOOLEAN DEFAULT false,
+        owner VARCHAR(255),
+        eta DATE,
+        sort_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_ideas (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER REFERENCES changelog_projects(id) ON DELETE CASCADE,
+        title VARCHAR(500) NOT NULL,
+        why TEXT,
+        sort_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_timeline (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER REFERENCES changelog_projects(id) ON DELETE CASCADE,
+        phase VARCHAR(100) NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        done BOOLEAN DEFAULT false,
+        current BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Create indexes for better performance
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_projects_status ON changelog_projects(status);
+      CREATE INDEX IF NOT EXISTS idx_projects_updated ON changelog_projects(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_projects_slug ON changelog_projects(slug);
+      CREATE INDEX IF NOT EXISTS idx_updates_project ON changelog_updates(project_id);
+      CREATE INDEX IF NOT EXISTS idx_images_project ON project_images(project_id);
+      CREATE INDEX IF NOT EXISTS idx_next_steps_project ON project_next_steps(project_id);
+      CREATE INDEX IF NOT EXISTS idx_ideas_project ON project_ideas(project_id);
+      CREATE INDEX IF NOT EXISTS idx_timeline_project ON project_timeline(project_id);
+    `);
+
+    console.log('Database tables initialized with new schema');
+  } catch (error) {
+    console.error('Error initializing tables:', error);
+  }
+};
+
+// Initialize tables on startup
+initTables();
+
+// API Routes
+
+// Get all projects
+app.get('/api/projects', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT cp.*, NULL as fider_tag_name, NULL as fider_tag_color,
+             COUNT(cu.id) as update_count
+      FROM changelog_projects cp
+      LEFT JOIN changelog_updates cu ON cp.id = cu.project_id
+      GROUP BY cp.id
+      ORDER BY cp.updated_at DESC
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching projects:', error);
+    res.status(500).json({ error: 'Failed to fetch projects' });
+  }
+});
+
+// Get project with updates
+app.get('/api/projects/:id', async (req, res) => {
+  try {
+    const projectResult = await pool.query(`
+      SELECT cp.*, t.name as fider_tag_name, t.color as fider_tag_color
+      FROM changelog_projects cp
+      LEFT JOIN tags t ON cp.fider_tag_id = t.id
+      WHERE cp.id = $1
+    `, [req.params.id]);
+
+    if (projectResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    const updatesResult = await pool.query(`
+      SELECT cu.*, p.title as fider_post_title
+      FROM changelog_updates cu
+      LEFT JOIN posts p ON cu.fider_post_id = p.id
+      WHERE cu.project_id = $1
+      ORDER BY cu.created_at DESC
+    `, [req.params.id]);
+
+    const imagesResult = await pool.query(`
+      SELECT *
+      FROM project_images
+      WHERE project_id = $1
+      ORDER BY sort_order ASC
+    `, [req.params.id]);
+
+    const project = projectResult.rows[0];
+    project.updates = updatesResult.rows;
+    project.images = imagesResult.rows;
+
+    res.json(project);
+  } catch (error) {
+    console.error('Error fetching project:', error);
+    res.status(500).json({ error: 'Failed to fetch project' });
+  }
+});
+
+// Create new project (admin only)
+app.post('/api/projects', adminAuth, async (req, res) => {
+  try {
+    const { name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status } = req.body;
+
+    // Validate status values
+    const validStatuses = ['In Planning', 'In Development', 'In Beta Testing', 'Live'];
+    const projectStatus = status && validStatuses.includes(status) ? status : 'In Planning';
+
+    const result = await pool.query(`
+      INSERT INTO changelog_projects (name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status, last_updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      RETURNING *
+    `, [name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, projectStatus]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error creating project:', error);
+    res.status(500).json({ error: 'Failed to create project' });
+  }
+});
+
+// Update existing project (admin only)
+app.put('/api/projects/:id', adminAuth, async (req, res) => {
+  try {
+    const { name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status } = req.body;
+
+    // Validate status values
+    const validStatuses = ['In Planning', 'In Development', 'In Beta Testing', 'Live'];
+    const projectStatus = status && validStatuses.includes(status) ? status : 'In Planning';
+
+    const result = await pool.query(`
+      UPDATE changelog_projects
+      SET name = $1, current_version = $2, next_steps = $3, launched_date = $4,
+          project_url = $5, fider_tag_id = $6, description = $7, status = $8,
+          updated_at = NOW(), last_updated_at = NOW()
+      WHERE id = $9
+      RETURNING *
+    `, [name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, projectStatus, req.params.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating project:', error);
+    res.status(500).json({ error: 'Failed to update project' });
+  }
+});
+
+// Archive/Delete project (admin only)
+app.delete('/api/projects/:id', adminAuth, async (req, res) => {
+  try {
+    const projectId = req.params.id;
+
+    // First delete all updates for this project (cascade should handle this, but being explicit)
+    await pool.query('DELETE FROM changelog_updates WHERE project_id = $1', [projectId]);
+
+    // Then delete the project
+    const result = await pool.query(
+      'DELETE FROM changelog_projects WHERE id = $1 RETURNING *',
+      [projectId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    res.json({ message: 'Project deleted successfully', project: result.rows[0] });
+  } catch (error) {
+    console.error('Error deleting project:', error);
+    res.status(500).json({ error: 'Failed to delete project' });
+  }
+});
+
+// Add update to project (admin only)
+app.post('/api/projects/:id/updates', adminAuth, async (req, res) => {
+  try {
+    const { status, notes, update_date } = req.body;
+    const cleanedNotes = await cleanNotesWithAI(notes);
+
+    // Use provided update_date or default to now
+    const updateDate = update_date || new Date().toISOString();
+
+    const result = await pool.query(`
+      INSERT INTO changelog_updates (project_id, status, notes, raw_notes, update_date)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+    `, [req.params.id, status, JSON.stringify(cleanedNotes), notes, updateDate]);
+
+    // Update project's updated_at timestamp
+    await pool.query(`
+      UPDATE changelog_projects 
+      SET updated_at = NOW() 
+      WHERE id = $1
+    `, [req.params.id]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error adding update:', error);
+    res.status(500).json({ error: 'Failed to add update' });
+  }
+});
+
+// Get available Fider tags
+app.get('/api/fider-tags', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, name, slug, color, is_public
+      FROM tags
+      WHERE tenant_id = 1 AND is_public = true
+      ORDER BY name
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching Fider tags:', error);
+    res.status(500).json({ error: 'Failed to fetch tags' });
+  }
+});
+
+// Get completed Fider posts for a tag
+app.get('/api/fider-completed/:tagId', adminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT p.id, p.title, p.description, p.created_at, p.status,
+             u.name as author_name, u.email as author_email
+      FROM posts p
+      JOIN post_tags pt ON p.id = pt.post_id
+      JOIN users u ON p.user_id = u.id
+      WHERE pt.tag_id = $1 AND p.status = 3 AND p.tenant_id = 1
+      ORDER BY p.created_at DESC
+      LIMIT 50
+    `, [req.params.tagId]);
+    
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching completed Fider posts:', error);
+    res.status(500).json({ error: 'Failed to fetch completed posts' });
+  }
+});
+
+// Import completed Fider post as changelog update
+app.post('/api/import-fider-post', adminAuth, async (req, res) => {
+  try {
+    const { projectId, fiderPostId, status = 'Completed' } = req.body;
+
+    // Get the Fider post details
+    const postResult = await pool.query(`
+      SELECT title, description FROM posts WHERE id = $1 AND tenant_id = 1
+    `, [fiderPostId]);
+
+    if (postResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Fider post not found' });
+    }
+
+    const post = postResult.rows[0];
+    const notes = `${post.title}\n${post.description || ''}`;
+    const cleanedNotes = await cleanNotesWithAI(notes);
+
+    const result = await pool.query(`
+      INSERT INTO changelog_updates (project_id, status, notes, raw_notes, fider_post_id)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+    `, [projectId, status, JSON.stringify(cleanedNotes), notes, fiderPostId]);
+
+    // Update project's updated_at timestamp
+    await pool.query(`
+      UPDATE changelog_projects 
+      SET updated_at = NOW() 
+      WHERE id = $1
+    `, [projectId]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error importing Fider post:', error);
+    res.status(500).json({ error: 'Failed to import Fider post' });
+  }
+});
+
+// Upload image for project (admin only)
+app.post('/api/projects/:id/images', adminAuth, upload.single('image'), async (req, res) => {
+  try {
+    const projectId = req.params.id;
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    const imageUrl = `/uploads/${req.file.filename}`;
+    const altText = req.body.alt || req.file.originalname;
+
+    // Get current max sort_order for this project
+    const maxOrderResult = await pool.query(`
+      SELECT COALESCE(MAX(sort_order), 0) as max_order
+      FROM project_images
+      WHERE project_id = $1
+    `, [projectId]);
+
+    const sortOrder = maxOrderResult.rows[0].max_order + 1;
+
+    const result = await pool.query(`
+      INSERT INTO project_images (project_id, src, alt, sort_order)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+    `, [projectId, imageUrl, altText, sortOrder]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error uploading image:', error);
+    res.status(500).json({ error: 'Failed to upload image' });
+  }
+});
+
+// Get images for project
+app.get('/api/projects/:id/images', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT *
+      FROM project_images
+      WHERE project_id = $1
+      ORDER BY sort_order ASC
+    `, [req.params.id]);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching images:', error);
+    res.status(500).json({ error: 'Failed to fetch images' });
+  }
+});
+
+// Delete image (admin only)
+app.delete('/api/projects/:projectId/images/:imageId', adminAuth, async (req, res) => {
+  try {
+    const { projectId, imageId } = req.params;
+
+    // Get image details before deleting
+    const imageResult = await pool.query(`
+      SELECT src FROM project_images
+      WHERE id = $1 AND project_id = $2
+    `, [imageId, projectId]);
+
+    if (imageResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    const imageSrc = imageResult.rows[0].src;
+
+    // Delete from database
+    await pool.query(`
+      DELETE FROM project_images
+      WHERE id = $1 AND project_id = $2
+    `, [imageId, projectId]);
+
+    // Delete file from filesystem
+    const filePath = path.join(__dirname, imageSrc);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+
+    res.json({ message: 'Image deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting image:', error);
+    res.status(500).json({ error: 'Failed to delete image' });
+  }
+});
+
+// Update image order (admin only)
+app.put('/api/projects/:projectId/images/:imageId', adminAuth, async (req, res) => {
+  try {
+    const { projectId, imageId } = req.params;
+    const { sort_order, alt } = req.body;
+
+    const result = await pool.query(`
+      UPDATE project_images
+      SET sort_order = COALESCE($1, sort_order),
+          alt = COALESCE($2, alt)
+      WHERE id = $3 AND project_id = $4
+      RETURNING *
+    `, [sort_order, alt, imageId, projectId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating image:', error);
+    res.status(500).json({ error: 'Failed to update image' });
+  }
+});
+
+// Public changelog view (no auth required)
+app.get('/api/public/projects', async (req, res) => {
+  try {
+    const projectsResult = await pool.query(`
+      SELECT cp.id, cp.name, cp.current_version, cp.launched_date, cp.project_url,
+             cp.description, cp.status, cp.next_steps, cp.last_updated_at,
+             t.name as fider_tag_name, t.color as fider_tag_color,
+             COUNT(cu.id) as update_count
+      FROM changelog_projects cp
+      LEFT JOIN tags t ON cp.fider_tag_id = t.id
+      LEFT JOIN changelog_updates cu ON cp.id = cu.project_id
+      GROUP BY cp.id, t.name, t.color
+      ORDER BY cp.last_updated_at DESC
+    `);
+
+    // Get images for all projects
+    const imagesResult = await pool.query(`
+      SELECT project_id, src, alt, sort_order
+      FROM project_images
+      ORDER BY project_id, sort_order ASC
+    `);
+
+    // Group images by project_id
+    const imagesByProject = {};
+    imagesResult.rows.forEach(image => {
+      if (!imagesByProject[image.project_id]) {
+        imagesByProject[image.project_id] = [];
+      }
+      imagesByProject[image.project_id].push(image);
+    });
+
+    // Add images to each project
+    const projectsWithImages = projectsResult.rows.map(project => ({
+      ...project,
+      images: imagesByProject[project.id] || []
+    }));
+
+    res.json(projectsWithImages);
+  } catch (error) {
+    console.error('Error fetching public projects:', error);
+    res.status(500).json({ error: 'Failed to fetch projects' });
+  }
+});
+
+// Public project updates (no auth required)
+app.get('/api/public/projects/:id/updates', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, status, notes, created_at
+      FROM changelog_updates
+      WHERE project_id = $1
+      ORDER BY created_at DESC
+      LIMIT 50
+    `, [req.params.id]);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching public updates:', error);
+    res.status(500).json({ error: 'Failed to fetch updates' });
+  }
+});
+
+
+app.listen(port, () => {
+  console.log(`Roadmap API server running on port ${port}`);
+});
