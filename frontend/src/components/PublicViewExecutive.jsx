@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Calendar, ExternalLink, ChevronDown, ChevronUp, Search, Filter, SortAsc } from 'lucide-react';
+import { formatDate as formatDateUtil } from '../utils/dateUtils';
 
 const API_BASE = window.location.origin + '/roadmap';
 
@@ -82,14 +83,7 @@ const PublicViewExecutive = () => {
     fetchUpdates(project.id);
   };
 
-  const formatDate = (dateString) => {
-    if (!dateString) return 'No date';
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric'
-    });
-  };
+  const formatDate = (d) => formatDateUtil(d) || 'No date';
 
   const toggleUpdateExpansion = (updateId) => {
     setExpandedUpdates(prev => ({

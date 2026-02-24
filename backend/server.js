@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
 const axios = require('axios');
 const multer = require('multer');
@@ -22,7 +23,54 @@ const pool = new Pool({
   connectionTimeoutMillis: 10000,
 });
 
-app.use(cors());
+// CORS — restrict to known origins
+const allowedOrigins = [
+  'https://feedback.edwinlovett.com',
+  'http://localhost:3003',
+  'http://localhost:3005',
+];
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (server-to-server, curl, health checks)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
+
+// Rate limiting
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 300,                  // 300 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 50,                   // Stricter for admin/auth endpoints
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' },
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,                   // Stricter for uploads
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many upload requests, please try again later' },
+});
+
+app.use(generalLimiter);
+
+// Stricter rate limits on admin and auth endpoints
+app.use('/api/projects', authLimiter);
+app.use('/api/import-fider-post', authLimiter);
+app.use('/api/admin', authLimiter);
+
 app.use(express.json());
 
 // Create uploads directory if it doesn't exist
@@ -52,7 +100,7 @@ const upload = multer({
     fileSize: 5 * 1024 * 1024, // 5MB limit
   },
   fileFilter: function (req, file, cb) {
-    // Check if the file is an image
+    // Check MIME type
     if (file.mimetype.startsWith('image/')) {
       cb(null, true)
     } else {
@@ -60,6 +108,29 @@ const upload = multer({
     }
   }
 })
+
+// Validate file magic numbers (first bytes) to prevent MIME spoofing
+const IMAGE_SIGNATURES = {
+  'ffd8ff':   'image/jpeg',   // JPEG
+  '89504e47': 'image/png',    // PNG
+  '47494638': 'image/gif',    // GIF
+  '52494646': 'image/webp',   // WebP (RIFF container)
+  '3c3f786d': 'image/svg+xml',// SVG (<?xml)
+  '3c737667': 'image/svg+xml',// SVG (<svg)
+};
+
+function validateImageMagicNumber(filePath) {
+  try {
+    const buffer = Buffer.alloc(8);
+    const fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buffer, 0, 8, 0);
+    fs.closeSync(fd);
+    const hex = buffer.toString('hex');
+    return Object.keys(IMAGE_SIGNATURES).some(sig => hex.startsWith(sig));
+  } catch {
+    return false;
+  }
+}
 
 // Add request logging middleware
 app.use((req, res, next) => {
@@ -260,7 +331,13 @@ const initTables = async () => {
       `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'In Development'`,
       `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS last_updated_at TIMESTAMP DEFAULT NOW()`,
       `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS project_url VARCHAR(500)`,
-      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS api_key VARCHAR(36) UNIQUE`
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS api_key VARCHAR(36) UNIQUE`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS priority VARCHAR(50) DEFAULT 'none'`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS start_date DATE`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS end_date DATE`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS date_label VARCHAR(50) DEFAULT 'Target Launch'`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS start_milestone VARCHAR(50) DEFAULT 'Requested'`,
+      `ALTER TABLE changelog_projects ADD COLUMN IF NOT EXISTS end_milestone VARCHAR(50) DEFAULT 'Live'`
     ];
 
     for (const query of alterQueries) {
@@ -342,6 +419,54 @@ const initTables = async () => {
       )
     `);
 
+    // Task groups and tasks for v3 milestone progress
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_task_groups (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER REFERENCES changelog_projects(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        milestone VARCHAR(50) NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_tasks (
+        id SERIAL PRIMARY KEY,
+        task_group_id INTEGER REFERENCES project_task_groups(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        done BOOLEAN DEFAULT false,
+        sort_order INTEGER DEFAULT 0,
+        completed_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Add scheduling columns to task groups and tasks
+    await pool.query(`
+      ALTER TABLE project_task_groups ADD COLUMN IF NOT EXISTS start_date DATE;
+      ALTER TABLE project_task_groups ADD COLUMN IF NOT EXISTS end_date DATE;
+      ALTER TABLE project_task_groups ADD COLUMN IF NOT EXISTS estimated_hours NUMERIC(6,1);
+    `);
+
+    await pool.query(`
+      ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS estimated_hours NUMERIC(6,1);
+    `);
+
+    // Project milestones for timeline markers
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_milestones (
+        id SERIAL PRIMARY KEY,
+        project_id INTEGER REFERENCES changelog_projects(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        target_date DATE NOT NULL,
+        icon VARCHAR(10) DEFAULT '◆',
+        sort_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
     // Create indexes for better performance
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_projects_status ON changelog_projects(status);
@@ -352,6 +477,9 @@ const initTables = async () => {
       CREATE INDEX IF NOT EXISTS idx_next_steps_project ON project_next_steps(project_id);
       CREATE INDEX IF NOT EXISTS idx_ideas_project ON project_ideas(project_id);
       CREATE INDEX IF NOT EXISTS idx_timeline_project ON project_timeline(project_id);
+      CREATE INDEX IF NOT EXISTS idx_task_groups_project ON project_task_groups(project_id);
+      CREATE INDEX IF NOT EXISTS idx_tasks_group ON project_tasks(task_group_id);
+      CREATE INDEX IF NOT EXISTS idx_milestones_project ON project_milestones(project_id);
     `);
 
     // Create API tokens table for external API authentication
@@ -463,17 +591,23 @@ app.get('/api/projects/:id', async (req, res) => {
 // Create new project (admin only)
 app.post('/api/projects', adminAuth, async (req, res) => {
   try {
-    const { name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status } = req.body;
+    const { name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status,
+            priority, start_date, end_date, date_label, start_milestone, end_milestone } = req.body;
 
     // Validate status values
     const validStatuses = ['Requested', 'In Planning', 'In Development', 'In Beta Testing', 'Live'];
     const projectStatus = status && validStatuses.includes(status) ? status : 'Requested';
 
     const result = await pool.query(`
-      INSERT INTO changelog_projects (name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status, last_updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      INSERT INTO changelog_projects
+        (name, current_version, next_steps, launched_date, project_url, fider_tag_id,
+         description, status, priority, start_date, end_date, date_label,
+         start_milestone, end_milestone, last_updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
       RETURNING *
-    `, [name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, projectStatus]);
+    `, [name, current_version, next_steps, launched_date, project_url, fider_tag_id,
+        description, projectStatus, priority || 'none', start_date || null, end_date || null,
+        date_label || 'Target Launch', start_milestone || 'Requested', end_milestone || 'Live']);
 
     res.json(result.rows[0]);
   } catch (error) {
@@ -485,7 +619,8 @@ app.post('/api/projects', adminAuth, async (req, res) => {
 // Update existing project (admin only)
 app.put('/api/projects/:id', adminAuth, async (req, res) => {
   try {
-    const { name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status } = req.body;
+    const { name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status,
+            priority, start_date, end_date, date_label, start_milestone, end_milestone } = req.body;
 
     // Validate status values
     const validStatuses = ['Requested', 'In Planning', 'In Development', 'In Beta Testing', 'Live'];
@@ -495,10 +630,15 @@ app.put('/api/projects/:id', adminAuth, async (req, res) => {
       UPDATE changelog_projects
       SET name = $1, current_version = $2, next_steps = $3, launched_date = $4,
           project_url = $5, fider_tag_id = $6, description = $7, status = $8,
+          priority = $9, start_date = $10, end_date = $11, date_label = $12,
+          start_milestone = $13, end_milestone = $14,
           updated_at = NOW(), last_updated_at = NOW()
-      WHERE id = $9
+      WHERE id = $15
       RETURNING *
-    `, [name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, projectStatus, req.params.id]);
+    `, [name, current_version, next_steps, launched_date, project_url, fider_tag_id,
+        description, projectStatus, priority || 'none', start_date || null, end_date || null,
+        date_label || 'Target Launch', start_milestone || 'Requested', end_milestone || 'Live',
+        req.params.id]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Project not found' });
@@ -533,6 +673,178 @@ app.delete('/api/projects/:id', adminAuth, async (req, res) => {
   } catch (error) {
     console.error('Error deleting project:', error);
     res.status(500).json({ error: 'Failed to delete project' });
+  }
+});
+
+// Get task groups for a project (admin only)
+app.get('/api/projects/:id/task-groups', adminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT tg.id, tg.project_id, tg.name, tg.milestone, tg.sort_order,
+             tg.start_date, tg.end_date, tg.estimated_hours,
+             json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               ORDER BY t.sort_order
+             ) FILTER (WHERE t.id IS NOT NULL) as tasks
+      FROM project_task_groups tg
+      LEFT JOIN project_tasks t ON tg.id = t.task_group_id
+      WHERE tg.project_id = $1
+      GROUP BY tg.id
+      ORDER BY tg.sort_order
+    `, [req.params.id]);
+
+    const taskGroups = result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      milestone: row.milestone,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      estimatedHours: row.estimated_hours ? parseFloat(row.estimated_hours) : null,
+      tasks: row.tasks || [],
+    }));
+
+    res.json(taskGroups);
+  } catch (error) {
+    console.error('Error fetching task groups:', error);
+    res.status(500).json({ error: 'Failed to fetch task groups' });
+  }
+});
+
+// Bulk upsert task groups for a project (admin only)
+app.put('/api/projects/:id/task-groups', adminAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const projectId = req.params.id;
+    const { taskGroups } = req.body;
+
+    await client.query('BEGIN');
+
+    // Delete existing groups (cascades to tasks)
+    await client.query('DELETE FROM project_task_groups WHERE project_id = $1', [projectId]);
+
+    // Insert new groups and their tasks
+    for (let i = 0; i < taskGroups.length; i++) {
+      const group = taskGroups[i];
+      const groupResult = await client.query(
+        `INSERT INTO project_task_groups (project_id, name, milestone, sort_order, start_date, end_date, estimated_hours)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [projectId, group.name, group.milestone, i, group.startDate || null, group.endDate || null, group.estimatedHours || null]
+      );
+      const groupId = groupResult.rows[0].id;
+
+      if (group.tasks && group.tasks.length > 0) {
+        for (let j = 0; j < group.tasks.length; j++) {
+          const task = group.tasks[j];
+          await client.query(
+            `INSERT INTO project_tasks (task_group_id, name, done, sort_order, completed_at, estimated_hours)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [groupId, task.name, task.done || false, j, task.done ? new Date() : null, task.estimatedHours || null]
+          );
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Re-fetch and return the saved structure
+    const result = await client.query(`
+      SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
+             tg.start_date, tg.end_date, tg.estimated_hours,
+             json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               ORDER BY t.sort_order
+             ) FILTER (WHERE t.id IS NOT NULL) as tasks
+      FROM project_task_groups tg
+      LEFT JOIN project_tasks t ON tg.id = t.task_group_id
+      WHERE tg.project_id = $1
+      GROUP BY tg.id
+      ORDER BY tg.sort_order
+    `, [projectId]);
+
+    res.json(result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      milestone: row.milestone,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      estimatedHours: row.estimated_hours ? parseFloat(row.estimated_hours) : null,
+      tasks: row.tasks || [],
+    })));
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error saving task groups:', error);
+    res.status(500).json({ error: 'Failed to save task groups' });
+  } finally {
+    client.release();
+  }
+});
+
+// Get milestones for a project (public)
+app.get('/api/public/projects/:id/milestones', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, name, target_date, icon, sort_order
+      FROM project_milestones
+      WHERE project_id = $1
+      ORDER BY sort_order
+    `, [req.params.id]);
+
+    res.json(result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      targetDate: row.target_date,
+      icon: row.icon,
+    })));
+  } catch (error) {
+    console.error('Error fetching milestones:', error);
+    res.status(500).json({ error: 'Failed to fetch milestones' });
+  }
+});
+
+// Bulk upsert milestones for a project (admin only)
+app.put('/api/projects/:id/milestones', adminAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const projectId = req.params.id;
+    const { milestones } = req.body;
+
+    await client.query('BEGIN');
+
+    // Delete existing milestones
+    await client.query('DELETE FROM project_milestones WHERE project_id = $1', [projectId]);
+
+    // Insert new milestones
+    for (let i = 0; i < milestones.length; i++) {
+      const m = milestones[i];
+      await client.query(
+        `INSERT INTO project_milestones (project_id, name, target_date, icon, sort_order)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [projectId, m.name, m.targetDate, m.icon || '◆', i]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    // Re-fetch and return
+    const result = await client.query(`
+      SELECT id, name, target_date, icon, sort_order
+      FROM project_milestones
+      WHERE project_id = $1
+      ORDER BY sort_order
+    `, [projectId]);
+
+    res.json(result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      targetDate: row.target_date,
+      icon: row.icon,
+    })));
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error saving milestones:', error);
+    res.status(500).json({ error: 'Failed to save milestones' });
+  } finally {
+    client.release();
   }
 });
 
@@ -641,12 +953,18 @@ app.post('/api/import-fider-post', adminAuth, async (req, res) => {
 });
 
 // Upload image for project (admin only)
-app.post('/api/projects/:id/images', adminAuth, upload.single('image'), async (req, res) => {
+app.post('/api/projects/:id/images', uploadLimiter, adminAuth, upload.single('image'), async (req, res) => {
   try {
     const projectId = req.params.id;
 
     if (!req.file) {
       return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    // Validate file magic number to prevent MIME spoofing
+    if (!validateImageMagicNumber(req.file.path)) {
+      fs.unlinkSync(req.file.path); // Clean up the invalid file
+      return res.status(400).json({ error: 'Invalid image file' });
     }
 
     const imageUrl = `/uploads/${req.file.filename}`;
@@ -868,7 +1186,7 @@ app.get('/api/docs', (req, res) => {
   const path = require('path');
   const marked = require('marked');
 
-  const mdPath = path.join(__dirname, 'API_DOCS.md');
+  const mdPath = path.join(__dirname, '..', 'docs', 'API_DOCS.md');
 
   if (!fs.existsSync(mdPath)) {
     return res.status(404).send('API documentation not found');
@@ -938,7 +1256,7 @@ app.get('/api/claude-guide', (req, res) => {
   const path = require('path');
   const marked = require('marked');
 
-  const mdPath = path.join(__dirname, 'CLAUDE_CODE_INTEGRATION.md');
+  const mdPath = path.join(__dirname, '..', 'docs', 'CLAUDE_CODE_INTEGRATION.md');
 
   if (!fs.existsSync(mdPath)) {
     return res.status(404).send('Claude Code integration guide not found');
@@ -1014,6 +1332,8 @@ app.get('/api/public/projects', async (req, res) => {
     const projectsResult = await pool.query(`
       SELECT cp.id, cp.name, cp.current_version, cp.launched_date, cp.project_url,
              cp.description, cp.status, cp.next_steps, cp.last_updated_at,
+             cp.priority, cp.start_date, cp.end_date, cp.date_label,
+             cp.start_milestone, cp.end_milestone,
              t.name as fider_tag_name, t.color as fider_tag_color,
              COUNT(cu.id) as update_count
       FROM changelog_projects cp
@@ -1039,13 +1359,70 @@ app.get('/api/public/projects', async (req, res) => {
       imagesByProject[image.project_id].push(image);
     });
 
-    // Add images to each project
-    const projectsWithImages = projectsResult.rows.map(project => ({
+    // Get task groups with nested tasks for all projects
+    const taskGroupsResult = await pool.query(`
+      SELECT tg.id, tg.project_id, tg.name, tg.milestone, tg.sort_order,
+             tg.start_date, tg.end_date, tg.estimated_hours,
+             json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               ORDER BY t.sort_order
+             ) FILTER (WHERE t.id IS NOT NULL) as tasks
+      FROM project_task_groups tg
+      LEFT JOIN project_tasks t ON tg.id = t.task_group_id
+      GROUP BY tg.id
+      ORDER BY tg.project_id, tg.sort_order
+    `);
+
+    // Group task groups by project_id
+    const taskGroupsByProject = {};
+    taskGroupsResult.rows.forEach(group => {
+      if (!taskGroupsByProject[group.project_id]) {
+        taskGroupsByProject[group.project_id] = [];
+      }
+      taskGroupsByProject[group.project_id].push({
+        name: group.name,
+        milestone: group.milestone,
+        startDate: group.start_date,
+        endDate: group.end_date,
+        estimatedHours: group.estimated_hours ? parseFloat(group.estimated_hours) : null,
+        tasks: group.tasks || [],
+      });
+    });
+
+    // Get milestones for all projects
+    const milestonesResult = await pool.query(`
+      SELECT id, project_id, name, target_date, icon, sort_order
+      FROM project_milestones
+      ORDER BY project_id, sort_order
+    `);
+
+    const milestonesByProject = {};
+    milestonesResult.rows.forEach(m => {
+      if (!milestonesByProject[m.project_id]) {
+        milestonesByProject[m.project_id] = [];
+      }
+      milestonesByProject[m.project_id].push({
+        id: m.id,
+        name: m.name,
+        targetDate: m.target_date,
+        icon: m.icon,
+      });
+    });
+
+    // Combine all data for each project
+    const projectsWithData = projectsResult.rows.map(project => ({
       ...project,
-      images: imagesByProject[project.id] || []
+      images: imagesByProject[project.id] || [],
+      taskGroups: taskGroupsByProject[project.id] || [],
+      milestones: milestonesByProject[project.id] || [],
+      startDate: project.start_date,
+      endDate: project.end_date,
+      dateLabel: project.date_label || (project.status === 'Live' ? 'Launched' : 'Target Launch'),
+      startMilestone: project.start_milestone,
+      endMilestone: project.end_milestone,
     }));
 
-    res.json(projectsWithImages);
+    res.json(projectsWithData);
   } catch (error) {
     console.error('Error fetching public projects:', error);
     res.status(500).json({ error: 'Failed to fetch projects' });
@@ -1075,12 +1452,13 @@ app.get('/api/public/projects/:id/updates', async (req, res) => {
 // External API v1 Endpoints (Token-based authentication)
 // ============================================================
 
-// GET /api/v1/projects - List all projects with api_keys
+// GET /api/v1/projects - List all projects with api_keys, task groups, milestones
 app.get('/api/v1/projects', apiAuth, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT cp.id, cp.api_key, cp.name, cp.current_version, cp.description,
-             cp.status, cp.launched_date, cp.project_url, cp.next_steps,
+             cp.status, cp.priority, cp.launched_date, cp.project_url, cp.next_steps,
+             cp.start_date, cp.end_date, cp.date_label, cp.start_milestone, cp.end_milestone,
              cp.created_at, cp.updated_at, cp.last_updated_at,
              t.name as fider_tag_name, t.color as fider_tag_color,
              COUNT(cu.id) as update_count
@@ -1091,10 +1469,58 @@ app.get('/api/v1/projects', apiAuth, async (req, res) => {
       ORDER BY cp.updated_at DESC
     `);
 
+    // Get task groups for all projects
+    const taskGroupsResult = await pool.query(`
+      SELECT tg.id, tg.project_id, tg.name, tg.milestone, tg.sort_order,
+             tg.start_date, tg.end_date, tg.estimated_hours,
+             json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               ORDER BY t.sort_order
+             ) FILTER (WHERE t.id IS NOT NULL) as tasks
+      FROM project_task_groups tg
+      LEFT JOIN project_tasks t ON tg.id = t.task_group_id
+      GROUP BY tg.id
+      ORDER BY tg.project_id, tg.sort_order
+    `);
+    const taskGroupsByProject = {};
+    taskGroupsResult.rows.forEach(g => {
+      if (!taskGroupsByProject[g.project_id]) taskGroupsByProject[g.project_id] = [];
+      taskGroupsByProject[g.project_id].push({
+        id: g.id, name: g.name, milestone: g.milestone,
+        startDate: g.start_date, endDate: g.end_date,
+        estimatedHours: g.estimated_hours ? parseFloat(g.estimated_hours) : null,
+        tasks: g.tasks || [],
+      });
+    });
+
+    // Get milestones for all projects
+    const milestonesResult = await pool.query(`
+      SELECT id, project_id, name, target_date, icon, sort_order
+      FROM project_milestones ORDER BY project_id, sort_order
+    `);
+    const milestonesByProject = {};
+    milestonesResult.rows.forEach(m => {
+      if (!milestonesByProject[m.project_id]) milestonesByProject[m.project_id] = [];
+      milestonesByProject[m.project_id].push({
+        id: m.id, name: m.name, targetDate: m.target_date, icon: m.icon,
+      });
+    });
+
+    const projects = result.rows.map(p => ({
+      ...p,
+      startDate: p.start_date,
+      endDate: p.end_date,
+      dateLabel: p.date_label,
+      startMilestone: p.start_milestone,
+      endMilestone: p.end_milestone,
+      taskGroups: taskGroupsByProject[p.id] || [],
+      milestones: milestonesByProject[p.id] || [],
+    }));
+
     res.json({
       success: true,
-      count: result.rows.length,
-      projects: result.rows
+      count: projects.length,
+      projects
     });
   } catch (error) {
     console.error('API v1 - Error listing projects:', error);
@@ -1131,6 +1557,40 @@ app.get('/api/v1/projects/:identifier', apiAuth, async (req, res) => {
       ORDER BY sort_order ASC
     `, [project.id]);
 
+    // Get task groups with tasks
+    const taskGroupsResult = await pool.query(`
+      SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
+             tg.start_date, tg.end_date, tg.estimated_hours,
+             json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               ORDER BY t.sort_order
+             ) FILTER (WHERE t.id IS NOT NULL) as tasks
+      FROM project_task_groups tg
+      LEFT JOIN project_tasks t ON tg.id = t.task_group_id
+      WHERE tg.project_id = $1
+      GROUP BY tg.id
+      ORDER BY tg.sort_order
+    `, [project.id]);
+
+    const taskGroups = taskGroupsResult.rows.map(g => ({
+      id: g.id, name: g.name, milestone: g.milestone,
+      startDate: g.start_date, endDate: g.end_date,
+      estimatedHours: g.estimated_hours ? parseFloat(g.estimated_hours) : null,
+      tasks: g.tasks || [],
+    }));
+
+    // Get milestones
+    const milestonesResult = await pool.query(`
+      SELECT id, name, target_date, icon, sort_order
+      FROM project_milestones
+      WHERE project_id = $1
+      ORDER BY sort_order
+    `, [project.id]);
+
+    const milestones = milestonesResult.rows.map(m => ({
+      id: m.id, name: m.name, targetDate: m.target_date, icon: m.icon,
+    }));
+
     // Get tag info
     let tagInfo = null;
     if (project.fider_tag_id) {
@@ -1147,8 +1607,15 @@ app.get('/api/v1/projects/:identifier', apiAuth, async (req, res) => {
       success: true,
       project: {
         ...project,
+        startDate: project.start_date,
+        endDate: project.end_date,
+        dateLabel: project.date_label,
+        startMilestone: project.start_milestone,
+        endMilestone: project.end_milestone,
         fider_tag_name: tagInfo?.name || null,
         fider_tag_color: tagInfo?.color || null,
+        taskGroups,
+        milestones,
         updates: updatesResult.rows,
         images: imagesResult.rows
       }
@@ -1162,7 +1629,8 @@ app.get('/api/v1/projects/:identifier', apiAuth, async (req, res) => {
 // POST /api/v1/projects - Create new project with optional images
 app.post('/api/v1/projects', apiAuth, upload.array('images', 10), async (req, res) => {
   try {
-    const { name, description, status, current_version, next_steps, launched_date, project_url, fider_tag_id } = req.body;
+    const { name, description, status, current_version, next_steps, launched_date, project_url, fider_tag_id,
+            priority, start_date, end_date, date_label, start_milestone, end_milestone } = req.body;
 
     // Validate required fields
     if (!name || !description) {
@@ -1170,7 +1638,8 @@ app.post('/api/v1/projects', apiAuth, upload.array('images', 10), async (req, re
         success: false,
         error: 'Missing required fields',
         required: ['name', 'description'],
-        optional: ['status', 'current_version', 'next_steps', 'launched_date', 'project_url', 'fider_tag_id', 'images']
+        optional: ['status', 'current_version', 'next_steps', 'launched_date', 'project_url', 'fider_tag_id',
+                    'priority', 'start_date', 'end_date', 'date_label', 'start_milestone', 'end_milestone', 'images']
       });
     }
 
@@ -1184,10 +1653,12 @@ app.post('/api/v1/projects', apiAuth, upload.array('images', 10), async (req, re
 
     // Create project
     const projectResult = await pool.query(`
-      INSERT INTO changelog_projects (name, description, status, current_version, next_steps, launched_date, project_url, fider_tag_id, api_key, last_updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+      INSERT INTO changelog_projects (name, description, status, current_version, next_steps, launched_date, project_url, fider_tag_id, api_key,
+                                       priority, start_date, end_date, date_label, start_milestone, end_milestone, last_updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
       RETURNING *
-    `, [name, description, projectStatus, current_version || '', next_steps || '', launched_date || '', project_url || '', fider_tag_id || null, apiKey]);
+    `, [name, description, projectStatus, current_version || '', next_steps || '', launched_date || '', project_url || '', fider_tag_id || null, apiKey,
+        priority || 'none', start_date || null, end_date || null, date_label || 'Target Launch', start_milestone || 'Requested', end_milestone || 'Live']);
 
     const project = projectResult.rows[0];
 
@@ -1344,6 +1815,203 @@ app.post('/api/v1/projects/:identifier/images', apiAuth, upload.array('images', 
   } catch (error) {
     console.error('API v1 - Error uploading images:', error);
     res.status(500).json({ success: false, error: 'Failed to upload images' });
+  }
+});
+
+// GET /api/v1/projects/:identifier/task-groups - Get task groups for a project
+app.get('/api/v1/projects/:identifier/task-groups', apiAuth, async (req, res) => {
+  try {
+    const project = await findProjectByIdentifier(req.params.identifier);
+    if (!project) {
+      return res.status(404).json({ success: false, error: 'Project not found', hint: 'Use api_key (UUID) or exact project name' });
+    }
+
+    const result = await pool.query(`
+      SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
+             tg.start_date, tg.end_date, tg.estimated_hours,
+             json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               ORDER BY t.sort_order
+             ) FILTER (WHERE t.id IS NOT NULL) as tasks
+      FROM project_task_groups tg
+      LEFT JOIN project_tasks t ON tg.id = t.task_group_id
+      WHERE tg.project_id = $1
+      GROUP BY tg.id
+      ORDER BY tg.sort_order
+    `, [project.id]);
+
+    res.json({
+      success: true,
+      project_id: project.id,
+      project_name: project.name,
+      taskGroups: result.rows.map(g => ({
+        id: g.id, name: g.name, milestone: g.milestone,
+        startDate: g.start_date, endDate: g.end_date,
+        estimatedHours: g.estimated_hours ? parseFloat(g.estimated_hours) : null,
+        tasks: g.tasks || [],
+      }))
+    });
+  } catch (error) {
+    console.error('API v1 - Error fetching task groups:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch task groups' });
+  }
+});
+
+// PUT /api/v1/projects/:identifier/task-groups - Bulk upsert task groups
+app.put('/api/v1/projects/:identifier/task-groups', apiAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const project = await findProjectByIdentifier(req.params.identifier);
+    if (!project) {
+      client.release();
+      return res.status(404).json({ success: false, error: 'Project not found', hint: 'Use api_key (UUID) or exact project name' });
+    }
+
+    const { taskGroups } = req.body;
+    if (!Array.isArray(taskGroups)) {
+      client.release();
+      return res.status(400).json({ success: false, error: 'taskGroups must be an array' });
+    }
+
+    await client.query('BEGIN');
+    await client.query('DELETE FROM project_task_groups WHERE project_id = $1', [project.id]);
+
+    for (let i = 0; i < taskGroups.length; i++) {
+      const group = taskGroups[i];
+      const groupResult = await client.query(
+        `INSERT INTO project_task_groups (project_id, name, milestone, sort_order, start_date, end_date, estimated_hours)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [project.id, group.name, group.milestone || 'Planning', i, group.startDate || null, group.endDate || null, group.estimatedHours || null]
+      );
+      const groupId = groupResult.rows[0].id;
+
+      if (group.tasks && group.tasks.length > 0) {
+        for (let j = 0; j < group.tasks.length; j++) {
+          const task = group.tasks[j];
+          await client.query(
+            `INSERT INTO project_tasks (task_group_id, name, done, sort_order, completed_at, estimated_hours)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [groupId, task.name, task.done || false, j, task.done ? new Date() : null, task.estimatedHours || null]
+          );
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Re-fetch saved structure
+    const result = await client.query(`
+      SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
+             tg.start_date, tg.end_date, tg.estimated_hours,
+             json_agg(
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               ORDER BY t.sort_order
+             ) FILTER (WHERE t.id IS NOT NULL) as tasks
+      FROM project_task_groups tg
+      LEFT JOIN project_tasks t ON tg.id = t.task_group_id
+      WHERE tg.project_id = $1
+      GROUP BY tg.id
+      ORDER BY tg.sort_order
+    `, [project.id]);
+
+    res.json({
+      success: true,
+      message: 'Task groups saved successfully',
+      project_id: project.id,
+      taskGroups: result.rows.map(g => ({
+        id: g.id, name: g.name, milestone: g.milestone,
+        startDate: g.start_date, endDate: g.end_date,
+        estimatedHours: g.estimated_hours ? parseFloat(g.estimated_hours) : null,
+        tasks: g.tasks || [],
+      }))
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('API v1 - Error saving task groups:', error);
+    res.status(500).json({ success: false, error: 'Failed to save task groups' });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/v1/projects/:identifier/milestones - Get milestones for a project
+app.get('/api/v1/projects/:identifier/milestones', apiAuth, async (req, res) => {
+  try {
+    const project = await findProjectByIdentifier(req.params.identifier);
+    if (!project) {
+      return res.status(404).json({ success: false, error: 'Project not found', hint: 'Use api_key (UUID) or exact project name' });
+    }
+
+    const result = await pool.query(`
+      SELECT id, name, target_date, icon, sort_order
+      FROM project_milestones
+      WHERE project_id = $1
+      ORDER BY sort_order
+    `, [project.id]);
+
+    res.json({
+      success: true,
+      project_id: project.id,
+      project_name: project.name,
+      milestones: result.rows.map(m => ({
+        id: m.id, name: m.name, targetDate: m.target_date, icon: m.icon,
+      }))
+    });
+  } catch (error) {
+    console.error('API v1 - Error fetching milestones:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch milestones' });
+  }
+});
+
+// PUT /api/v1/projects/:identifier/milestones - Bulk upsert milestones
+app.put('/api/v1/projects/:identifier/milestones', apiAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const project = await findProjectByIdentifier(req.params.identifier);
+    if (!project) {
+      client.release();
+      return res.status(404).json({ success: false, error: 'Project not found', hint: 'Use api_key (UUID) or exact project name' });
+    }
+
+    const { milestones } = req.body;
+    if (!Array.isArray(milestones)) {
+      client.release();
+      return res.status(400).json({ success: false, error: 'milestones must be an array' });
+    }
+
+    await client.query('BEGIN');
+    await client.query('DELETE FROM project_milestones WHERE project_id = $1', [project.id]);
+
+    for (let i = 0; i < milestones.length; i++) {
+      const m = milestones[i];
+      await client.query(
+        `INSERT INTO project_milestones (project_id, name, target_date, icon, sort_order)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [project.id, m.name, m.targetDate, m.icon || '◆', i]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    const result = await client.query(`
+      SELECT id, name, target_date, icon, sort_order
+      FROM project_milestones WHERE project_id = $1 ORDER BY sort_order
+    `, [project.id]);
+
+    res.json({
+      success: true,
+      message: 'Milestones saved successfully',
+      project_id: project.id,
+      milestones: result.rows.map(m => ({
+        id: m.id, name: m.name, targetDate: m.target_date, icon: m.icon,
+      }))
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('API v1 - Error saving milestones:', error);
+    res.status(500).json({ success: false, error: 'Failed to save milestones' });
+  } finally {
+    client.release();
   }
 });
 

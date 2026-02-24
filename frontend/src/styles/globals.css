@@ -273,4 +273,14 @@
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     @apply bg-white/20;
   }
+
+  /* Hide scrollbar but keep functionality */
+  .hide-scrollbar {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE and Edge */
+  }
+
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none; /* Chrome, Safari, Opera */
+  }
 }

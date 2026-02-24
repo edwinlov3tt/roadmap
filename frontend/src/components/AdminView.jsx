@@ -3,6 +3,7 @@ import axios from 'axios';
 import { Plus, Calendar, Tag, FileText, Loader, ExternalLink, Download, Settings, Trash2, Edit, Upload, Key, RefreshCw, Copy, Check, Book } from 'lucide-react';
 import { GlassPanel } from './ui/GlassPanel';
 import { ImageUpload, ImageGallery } from './ui/ImageUpload';
+import { formatDate as formatDateUtil } from '../utils/dateUtils';
 
 const API_BASE = window.location.origin + '/roadmap';
 
@@ -310,13 +311,7 @@ const AdminView = () => {
     }
   };
 
-  const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
-  };
+  const formatDate = formatDateUtil;
 
   // API Token management functions
   const fetchApiTokens = async () => {

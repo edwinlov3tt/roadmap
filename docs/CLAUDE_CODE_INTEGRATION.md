@@ -52,6 +52,29 @@ Write in **simple, non-technical English**. Focus on WHAT changed and WHY it mat
 **Action verbs:** Added, Fixed, Improved, Updated, Removed, Integrated
 
 **Status values:** `Completed`, `In Progress`, `Testing`, `On Hold`
+
+### Updating Task Progress
+
+You can also update task groups to reflect development progress:
+
+\`\`\`bash
+curl -X PUT "https://feedback.edwinlovett.com/roadmap/api/v1/projects/PROJECT_NAME/task-groups" \
+  -H "Authorization: Bearer API_TOKEN_HERE" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskGroups": [
+      {
+        "name": "Sprint 1",
+        "milestone": "Dev",
+        "estimatedHours": 40,
+        "tasks": [
+          { "name": "Build API endpoints", "done": true },
+          { "name": "Create frontend views", "done": false }
+        ]
+      }
+    ]
+  }'
+\`\`\`
 ```
 
 ---
@@ -77,9 +100,11 @@ curl "https://feedback.edwinlovett.com/roadmap/api/v1/projects" \
   -H "Authorization: Bearer TOKEN"
 ```
 
+Returns projects with `taskGroups`, `milestones`, scheduling fields (`startDate`, `endDate`, `priority`), and `update_count`.
+
 #### Get Project Details
 ```bash
-# By name (URL-encode spaces as %20)
+# By name (URL-encode spaces and special chars)
 curl "https://feedback.edwinlovett.com/roadmap/api/v1/projects/My%20Project" \
   -H "Authorization: Bearer TOKEN"
 
@@ -87,6 +112,8 @@ curl "https://feedback.edwinlovett.com/roadmap/api/v1/projects/My%20Project" \
 curl "https://feedback.edwinlovett.com/roadmap/api/v1/projects/abc123-def456-..." \
   -H "Authorization: Bearer TOKEN"
 ```
+
+Returns full project with `taskGroups`, `milestones`, `updates`, and `images`.
 
 #### Post Update
 ```bash
@@ -106,8 +133,58 @@ curl -X POST "https://feedback.edwinlovett.com/roadmap/api/v1/projects" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Project Name",
-    "description": "What this project does and who it helps",
-    "status": "In Development"
+    "description": "What this project does",
+    "status": "In Development",
+    "priority": "high",
+    "start_date": "2026-01-01",
+    "end_date": "2026-06-30"
+  }'
+```
+
+#### Get Task Groups
+```bash
+curl "https://feedback.edwinlovett.com/roadmap/api/v1/projects/PROJECT_NAME/task-groups" \
+  -H "Authorization: Bearer TOKEN"
+```
+
+#### Save Task Groups (Bulk Upsert)
+```bash
+curl -X PUT "https://feedback.edwinlovett.com/roadmap/api/v1/projects/PROJECT_NAME/task-groups" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskGroups": [
+      {
+        "name": "Planning",
+        "milestone": "Planning",
+        "startDate": "2026-01-01",
+        "endDate": "2026-01-31",
+        "estimatedHours": 40,
+        "tasks": [
+          { "name": "Define requirements", "done": true },
+          { "name": "Create wireframes", "done": false }
+        ]
+      }
+    ]
+  }'
+```
+
+#### Get Milestones
+```bash
+curl "https://feedback.edwinlovett.com/roadmap/api/v1/projects/PROJECT_NAME/milestones" \
+  -H "Authorization: Bearer TOKEN"
+```
+
+#### Save Milestones (Bulk Upsert)
+```bash
+curl -X PUT "https://feedback.edwinlovett.com/roadmap/api/v1/projects/PROJECT_NAME/milestones" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "milestones": [
+      { "name": "Beta Release", "targetDate": "2026-03-01", "icon": "◆" },
+      { "name": "Launch", "targetDate": "2026-04-20", "icon": "🚀" }
+    ]
   }'
 ```
 
@@ -136,11 +213,29 @@ curl -X POST "https://feedback.edwinlovett.com/roadmap/api/v1/projects" \
 After deploying a new feature to the "GTM Crawler" project:
 
 ```bash
+# Post the update
 curl -X POST "https://feedback.edwinlovett.com/roadmap/api/v1/projects/GTM%20Crawler/updates" \
   -H "Authorization: Bearer a4b494fc..." \
   -H "Content-Type: application/json" \
   -d '{
     "notes": "Added automatic retry logic for failed crawls. The system now retries up to 3 times before marking a crawl as failed, reducing the need for manual intervention.",
     "status": "Completed"
+  }'
+
+# Mark tasks as done
+curl -X PUT "https://feedback.edwinlovett.com/roadmap/api/v1/projects/GTM%20Crawler/task-groups" \
+  -H "Authorization: Bearer a4b494fc..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskGroups": [
+      {
+        "name": "Reliability",
+        "milestone": "Dev",
+        "tasks": [
+          { "name": "Implement retry logic", "done": true },
+          { "name": "Add circuit breaker", "done": false }
+        ]
+      }
+    ]
   }'
 ```
