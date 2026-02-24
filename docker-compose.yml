@@ -26,8 +26,6 @@ services:
     build: ./frontend
     ports:
       - "3003:80"
-    volumes:
-      - ./frontend/dist:/usr/share/nginx/html
     networks:
       - roadmap-network
     restart: unless-stopped

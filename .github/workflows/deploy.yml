@@ -1,0 +1,24 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          passphrase: ${{ secrets.DROPLET_SSH_PASSPHRASE }}
+          script: |
+            cd /var/roadmap
+            git pull origin main
+            docker compose up -d --build
+            sleep 5
+            curl -sf http://localhost:3002/api/public/projects > /dev/null && echo "✅ Backend OK" || echo "❌ Backend FAILED"
+            curl -sf http://localhost:3003/ > /dev/null && echo "✅ Frontend OK" || echo "❌ Frontend FAILED"
