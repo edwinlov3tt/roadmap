@@ -616,29 +616,60 @@ app.post('/api/projects', adminAuth, async (req, res) => {
   }
 });
 
-// Update existing project (admin only)
+// Update existing project (admin only) — PATCH semantics: only update provided fields
 app.put('/api/projects/:id', adminAuth, async (req, res) => {
   try {
-    const { name, current_version, next_steps, launched_date, project_url, fider_tag_id, description, status,
-            priority, start_date, end_date, date_label, start_milestone, end_milestone } = req.body;
-
-    // Validate status values
     const validStatuses = ['Requested', 'In Planning', 'In Development', 'In Beta Testing', 'Live'];
-    const projectStatus = status && validStatuses.includes(status) ? status : 'Requested';
 
-    const result = await pool.query(`
-      UPDATE changelog_projects
-      SET name = $1, current_version = $2, next_steps = $3, launched_date = $4,
-          project_url = $5, fider_tag_id = $6, description = $7, status = $8,
-          priority = $9, start_date = $10, end_date = $11, date_label = $12,
-          start_milestone = $13, end_milestone = $14,
-          updated_at = NOW(), last_updated_at = NOW()
-      WHERE id = $15
-      RETURNING *
-    `, [name, current_version, next_steps, launched_date, project_url, fider_tag_id,
-        description, projectStatus, priority || 'none', start_date || null, end_date || null,
-        date_label || 'Target Launch', start_milestone || 'Requested', end_milestone || 'Live',
-        req.params.id]);
+    // Map of allowed fields → column names (with optional transform)
+    const fieldMap = {
+      name: 'name',
+      current_version: 'current_version',
+      next_steps: 'next_steps',
+      launched_date: 'launched_date',
+      project_url: 'project_url',
+      fider_tag_id: 'fider_tag_id',
+      description: 'description',
+      status: 'status',
+      priority: 'priority',
+      start_date: 'start_date',
+      end_date: 'end_date',
+      date_label: 'date_label',
+      start_milestone: 'start_milestone',
+      end_milestone: 'end_milestone',
+    };
+
+    const setClauses = [];
+    const values = [];
+    let paramIdx = 1;
+
+    for (const [field, column] of Object.entries(fieldMap)) {
+      if (req.body[field] !== undefined) {
+        let value = req.body[field];
+        // Validate status if provided
+        if (field === 'status') {
+          value = validStatuses.includes(value) ? value : undefined;
+          if (value === undefined) continue;
+        }
+        setClauses.push(`${column} = $${paramIdx}`);
+        values.push(value === '' ? null : value);
+        paramIdx++;
+      }
+    }
+
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    // Always update timestamps
+    setClauses.push('updated_at = NOW()');
+    setClauses.push('last_updated_at = NOW()');
+
+    values.push(req.params.id);
+    const result = await pool.query(
+      `UPDATE changelog_projects SET ${setClauses.join(', ')} WHERE id = $${paramIdx} RETURNING *`,
+      values
+    );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Project not found' });
@@ -746,8 +777,54 @@ app.put('/api/projects/:id/task-groups', adminAuth, async (req, res) => {
 
     await client.query('COMMIT');
 
+    // Auto-status progression: if all tasks in the current phase are done, advance
+    const milestoneToStatus = {
+      'Requested': 'Requested',
+      'Planning': 'In Planning',
+      'Dev': 'In Development',
+      'Beta': 'In Beta Testing',
+      'Live': 'Live',
+    };
+    const statusProgression = ['Requested', 'In Planning', 'In Development', 'In Beta Testing', 'Live'];
+
+    try {
+      const projResult = await pool.query('SELECT status FROM changelog_projects WHERE id = $1', [projectId]);
+      if (projResult.rows.length > 0) {
+        const currentStatus = projResult.rows[0].status;
+        const currentIdx = statusProgression.indexOf(currentStatus);
+
+        if (currentIdx >= 0 && currentIdx < statusProgression.length - 1 && taskGroups.length > 0) {
+          // Find the short milestone key for the current status
+          const currentMilestone = Object.entries(milestoneToStatus).find(([, v]) => v === currentStatus)?.[0];
+
+          if (currentMilestone) {
+            // Get all groups in the current milestone phase
+            const currentPhaseGroups = taskGroups.filter(g => g.milestone === currentMilestone);
+
+            if (currentPhaseGroups.length > 0) {
+              // Check if ALL tasks in those groups are done
+              const allTasks = currentPhaseGroups.flatMap(g => g.tasks || []);
+              const allDone = allTasks.length > 0 && allTasks.every(t => t.done);
+
+              if (allDone) {
+                const nextStatus = statusProgression[currentIdx + 1];
+                await pool.query(
+                  'UPDATE changelog_projects SET status = $1, updated_at = NOW(), last_updated_at = NOW() WHERE id = $2',
+                  [nextStatus, projectId]
+                );
+                console.log(`Auto-advanced project ${projectId} from "${currentStatus}" to "${nextStatus}"`);
+              }
+            }
+          }
+        }
+      }
+    } catch (autoErr) {
+      // Non-critical — log but don't fail the save
+      console.error('Auto-status progression error (non-fatal):', autoErr);
+    }
+
     // Re-fetch and return the saved structure
-    const result = await client.query(`
+    const result = await pool.query(`
       SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
              tg.start_date, tg.end_date, tg.estimated_hours,
              json_agg(
