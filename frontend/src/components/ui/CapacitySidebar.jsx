@@ -18,8 +18,12 @@ function dateStr(d) {
 function getProjectInfo(project) {
   // Timeline format (has tasks with hours/dates)
   if (project.tasks && project.tasks.length > 0) {
-    const totalHours = project.tasks.reduce((s, t) => s + (t.hours || 0), 0);
-    const dates = project.tasks
+    // Drill into group children for accurate hour totals
+    const allItems = project.tasks.flatMap(t =>
+      t.isGroup && t.children?.length > 0 ? t.children : [t]
+    );
+    const totalHours = allItems.reduce((s, t) => s + (t.hours || 0), 0);
+    const dates = allItems
       .filter(t => t.startDate && t.endDate)
       .flatMap(t => [parseDate(t.startDate), parseDate(t.endDate)]);
     if (dates.length === 0) return null;

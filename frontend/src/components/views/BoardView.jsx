@@ -13,12 +13,22 @@ const statusColumns = [
   { id: 'Requested', label: 'Requested', color: '#8B91A0', dotted: true }
 ];
 
-export const BoardView = React.memo(({ projects, onProjectClick }) => {
+export const BoardView = React.memo(({ projects, onProjectClick, focusedStatus, searchTerm }) => {
   const prefersReducedMotion = useReducedMotion();
 
+  // Filter projects by search term
+  const filteredProjects = searchTerm?.trim()
+    ? projects.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    : projects;
+
+  // Filter columns by focused status
+  const visibleColumns = focusedStatus
+    ? statusColumns.filter(c => c.id === focusedStatus)
+    : statusColumns;
+
   // Group projects by status
-  const projectsByStatus = statusColumns.reduce((acc, column) => {
-    acc[column.id] = projects.filter(p => p.status === column.id);
+  const projectsByStatus = visibleColumns.reduce((acc, column) => {
+    acc[column.id] = filteredProjects.filter(p => p.status === column.id);
     return acc;
   }, {});
 
@@ -34,7 +44,7 @@ export const BoardView = React.memo(({ projects, onProjectClick }) => {
             transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
           >
             <AnimatePresence mode="popLayout">
-              {statusColumns.map((column) => {
+              {visibleColumns.map((column) => {
                 const columnProjects = projectsByStatus[column.id] || [];
 
                 return (
@@ -74,8 +84,8 @@ export const BoardView = React.memo(({ projects, onProjectClick }) => {
                               className="h-full rounded-full"
                               style={{
                                 backgroundColor: column.color,
-                                width: projects.length > 0
-                                  ? `${(columnProjects.length / projects.length) * 100}%`
+                                width: filteredProjects.length > 0
+                                  ? `${(columnProjects.length / filteredProjects.length) * 100}%`
                                   : '0%'
                               }}
                             />
@@ -85,8 +95,8 @@ export const BoardView = React.memo(({ projects, onProjectClick }) => {
                               style={{ backgroundColor: column.color }}
                               initial={{ width: 0 }}
                               animate={{
-                                width: projects.length > 0
-                                  ? `${(columnProjects.length / projects.length) * 100}%`
+                                width: filteredProjects.length > 0
+                                  ? `${(columnProjects.length / filteredProjects.length) * 100}%`
                                   : '0%'
                               }}
                               transition={{ duration: 0.5, ease: 'easeOut' }}
@@ -96,7 +106,7 @@ export const BoardView = React.memo(({ projects, onProjectClick }) => {
                       </header>
 
                     {/* Column Cards */}
-                    <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar min-h-0 space-y-4">
+                    <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar min-h-0 space-y-4 pb-8">
                       <AnimatePresence mode="popLayout">
                         {columnProjects.map((project) => (
                           <ProjectCard

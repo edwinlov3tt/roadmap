@@ -92,6 +92,7 @@ function TodayLine({ days, totalDays, today }) {
  */
 export const TimelineView = React.memo(({ weekDays, projects, onProjectClick, searchTerm = '' }) => {
   const [expandedProjects, setExpandedProjects] = useState({});
+  const [expandedGroups, setExpandedGroups] = useState({});
   const [archivedExpanded, setArchivedExpanded] = useState({});
   const [hoveredTask, setHoveredTask] = useState(null);
   const today = new Date();
@@ -108,6 +109,10 @@ export const TimelineView = React.memo(({ weekDays, projects, onProjectClick, se
 
   const toggleArchive = (id) => {
     setArchivedExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const toggleGroup = (groupId) => {
+    setExpandedGroups((prev) => ({ ...prev, [groupId]: !prev[groupId] }));
   };
 
   // Filter projects by search term
@@ -207,11 +212,13 @@ export const TimelineView = React.memo(({ weekDays, projects, onProjectClick, se
           {filteredProjects.map((project) => {
             const isExpanded = expandedProjects[project.id];
             const allTasks = project.tasks || [];
+            // Flatten groups to get individual task counts
+            const allItems = allTasks.flatMap(t => t.isGroup && t.children?.length > 0 ? t.children : [t]);
             const activeTasks = allTasks.filter((t) => t.status !== 'Done');
             const doneTasks = allTasks.filter((t) => t.status === 'Done');
-            const totalTasks = allTasks.length;
-            const doneCount = doneTasks.length;
-            const totalHours = allTasks.reduce((s, t) => s + (t.hours || 0), 0);
+            const totalTasks = allItems.length;
+            const doneCount = allItems.filter(t => t.status === 'Done').length;
+            const totalHours = allItems.reduce((s, t) => s + (t.hours || 0), 0);
             const sc = statusConfig[project.status];
             const isArchiveOpen = archivedExpanded[project.id];
 
@@ -272,8 +279,8 @@ export const TimelineView = React.memo(({ weekDays, projects, onProjectClick, se
                   <div className="flex-1 relative" style={{ height: '40px' }}>
                     {/* Summary bar spanning all tasks */}
                     {totalTasks > 0 && (() => {
-                      const allStarts = allTasks.map((t) => parseDate(t.startDate));
-                      const allEnds = allTasks.map((t) => parseDate(t.endDate));
+                      const allStarts = allItems.map((t) => parseDate(t.startDate));
+                      const allEnds = allItems.map((t) => parseDate(t.endDate));
                       const earliest = new Date(Math.min(...allStarts));
                       const latest = new Date(Math.max(...allEnds));
                       const bar = getTaskBar({
@@ -381,23 +388,70 @@ export const TimelineView = React.memo(({ weekDays, projects, onProjectClick, se
                   </div>
                 </div>
 
-                {/* Expanded task rows */}
+                {/* Expanded task/group rows */}
                 {isExpanded && (
                   <>
-                    {/* Active tasks */}
+                    {/* Active task groups and tasks */}
                     {activeTasks.map((task) => (
-                      <TaskRow
-                        key={task.id}
-                        task={task}
-                        project={project}
-                        bar={getTaskBar(task)}
-                        isHovered={hoveredTask === task.id}
-                        onMouseEnter={() => setHoveredTask(task.id)}
-                        onMouseLeave={() => setHoveredTask(null)}
-                      />
+                      task.isGroup && task.children?.length > 0 ? (
+                        <React.Fragment key={task.id}>
+                          <GroupRow
+                            task={task}
+                            project={project}
+                            bar={getTaskBar(task)}
+                            isExpanded={expandedGroups[task.id]}
+                            onToggle={() => toggleGroup(task.id)}
+                            isHovered={hoveredTask === task.id}
+                            onMouseEnter={() => setHoveredTask(task.id)}
+                            onMouseLeave={() => setHoveredTask(null)}
+                          />
+                          {expandedGroups[task.id] && task.children
+                            .filter(c => c.status !== 'Done')
+                            .map((child) => (
+                              <TaskRow
+                                key={child.id}
+                                task={child}
+                                project={project}
+                                bar={getTaskBar(child)}
+                                isHovered={hoveredTask === child.id}
+                                onMouseEnter={() => setHoveredTask(child.id)}
+                                onMouseLeave={() => setHoveredTask(null)}
+                                nested
+                              />
+                            ))}
+                          {/* Done children within expanded group */}
+                          {expandedGroups[task.id] && task.children.filter(c => c.status === 'Done').length > 0 && (
+                            <div className="relative z-[2]" style={{ backgroundColor: 'var(--color-base, #1D1D21)' }}>
+                              {task.children.filter(c => c.status === 'Done').map((child) => (
+                                <TaskRow
+                                  key={child.id}
+                                  task={child}
+                                  project={project}
+                                  bar={getTaskBar(child)}
+                                  isHovered={hoveredTask === child.id}
+                                  onMouseEnter={() => setHoveredTask(child.id)}
+                                  onMouseLeave={() => setHoveredTask(null)}
+                                  nested
+                                  archived
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </React.Fragment>
+                      ) : (
+                        <TaskRow
+                          key={task.id}
+                          task={task}
+                          project={project}
+                          bar={getTaskBar(task)}
+                          isHovered={hoveredTask === task.id}
+                          onMouseEnter={() => setHoveredTask(task.id)}
+                          onMouseLeave={() => setHoveredTask(null)}
+                        />
+                      )
                     ))}
 
-                    {/* Archive section for completed tasks - no grid lines */}
+                    {/* Archive section for completed groups/tasks */}
                     {doneTasks.length > 0 && (
                       <div className="relative z-[2]" style={{ backgroundColor: 'var(--color-base, #1D1D21)' }}>
                         <div
@@ -418,16 +472,29 @@ export const TimelineView = React.memo(({ weekDays, projects, onProjectClick, se
                         </div>
 
                         {isArchiveOpen && doneTasks.map((task) => (
-                          <TaskRow
-                            key={task.id}
-                            task={task}
-                            project={project}
-                            bar={getTaskBar(task)}
-                            isHovered={hoveredTask === task.id}
-                            onMouseEnter={() => setHoveredTask(task.id)}
-                            onMouseLeave={() => setHoveredTask(null)}
-                            archived
-                          />
+                          task.isGroup ? (
+                            <GroupRow
+                              key={task.id}
+                              task={task}
+                              project={project}
+                              bar={getTaskBar(task)}
+                              isHovered={hoveredTask === task.id}
+                              onMouseEnter={() => setHoveredTask(task.id)}
+                              onMouseLeave={() => setHoveredTask(null)}
+                              archived
+                            />
+                          ) : (
+                            <TaskRow
+                              key={task.id}
+                              task={task}
+                              project={project}
+                              bar={getTaskBar(task)}
+                              isHovered={hoveredTask === task.id}
+                              onMouseEnter={() => setHoveredTask(task.id)}
+                              onMouseLeave={() => setHoveredTask(null)}
+                              archived
+                            />
+                          )
                         ))}
                       </div>
                     )}
@@ -445,10 +512,95 @@ export const TimelineView = React.memo(({ weekDays, projects, onProjectClick, se
   );
 });
 
+/** Group row - expandable container for task groups */
+function GroupRow({ task, project, bar, isExpanded, onToggle, isHovered, onMouseEnter, onMouseLeave, archived }) {
+  const childDone = task.children?.filter(c => c.status === 'Done').length || 0;
+  const childTotal = task.children?.length || 0;
+
+  return (
+    <div
+      className="flex items-center border-b border-white/[0.02] transition-colors duration-100 cursor-pointer"
+      style={{
+        backgroundColor: isHovered ? 'rgba(255,255,255,0.02)' : 'transparent',
+        opacity: archived ? 0.4 : 1,
+      }}
+      onClick={(e) => { e.stopPropagation(); onToggle?.(); }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+    >
+      {/* Group label */}
+      <div className={`${LABEL_W} flex-shrink-0 py-2 px-4 flex items-center gap-2`} style={{ paddingLeft: '44px' }}>
+        {onToggle && (
+          <ChevronDown
+            size={11}
+            className="text-text-subtle transition-transform duration-200 flex-shrink-0"
+            style={{ transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+          />
+        )}
+        <StatusDot status={task.status} />
+        <div className="min-w-0 flex-1">
+          <div
+            className="truncate font-medium"
+            style={{
+              fontSize: '12px',
+              color: archived ? '#6B7080' : '#E0E2E6',
+              textDecoration: archived ? 'line-through' : 'none',
+            }}
+          >
+            {task.name}
+          </div>
+          <div style={{ fontSize: '11px', color: '#8B91A0', marginTop: '1px' }}>
+            {childDone}/{childTotal} tasks · {task.hours || 0}h
+          </div>
+        </div>
+      </div>
+
+      {/* Gantt bar - group-level container bar */}
+      <div className="flex-1 relative" style={{ height: '36px' }}>
+        <div
+          className="absolute transition-all duration-150 flex items-center overflow-hidden"
+          style={{
+            top: '10px',
+            height: '16px',
+            left: bar.left,
+            width: bar.width,
+            borderRadius: '4px',
+            backgroundColor: archived ? 'rgba(139,145,160,0.08)' : `${project.color}18`,
+            border: archived
+              ? '1px dashed rgba(139,145,160,0.15)'
+              : `1px dashed ${project.color}40`,
+            paddingLeft: '6px',
+          }}
+        >
+          {/* Progress fill */}
+          {childTotal > 0 && (
+            <div
+              className="absolute left-0 top-0 bottom-0"
+              style={{
+                width: `${(childDone / childTotal) * 100}%`,
+                backgroundColor: `${project.color}25`,
+                borderRadius: '3px',
+              }}
+            />
+          )}
+          <span
+            className="relative z-[1] truncate"
+            style={{ fontSize: '10px', fontWeight: 600, color: archived ? '#6B7080' : project.color }}
+          >
+            {task.hours || 0}h
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Individual task row - extracted for reuse in active/archived sections */
-function TaskRow({ task, project, bar, isHovered, onMouseEnter, onMouseLeave, archived }) {
+function TaskRow({ task, project, bar, isHovered, onMouseEnter, onMouseLeave, archived, nested }) {
   const subtaskDone = task.subtasks?.filter((s) => s.done).length || 0;
   const subtaskTotal = task.subtasks?.length || 0;
+  const indent = nested ? '64px' : '44px';
+  const barHeight = nested ? '12px' : '16px';
 
   return (
     <div
@@ -461,20 +613,20 @@ function TaskRow({ task, project, bar, isHovered, onMouseEnter, onMouseLeave, ar
       onMouseLeave={onMouseLeave}
     >
       {/* Task label */}
-      <div className={`${LABEL_W} flex-shrink-0 py-2 px-4 flex items-center gap-2`} style={{ paddingLeft: '44px' }}>
-        <StatusDot status={task.status} />
+      <div className={`${LABEL_W} flex-shrink-0 py-2 px-4 flex items-center gap-2`} style={{ paddingLeft: indent }}>
+        <StatusDot status={task.status} size={nested ? 6 : 8} />
         <div className="min-w-0 flex-1">
           <div
             className="truncate"
             style={{
-              fontSize: '12px',
+              fontSize: nested ? '11px' : '12px',
               color: archived ? '#6B7080' : task.status === 'Done' ? '#8B91A0' : '#C7CBD1',
               textDecoration: archived ? 'line-through' : 'none',
             }}
           >
             {task.name}
           </div>
-          {subtaskTotal > 0 ? (
+          {!nested && subtaskTotal > 0 ? (
             <div style={{ fontSize: '11px', color: '#8B91A0', marginTop: '1px' }}>
               {subtaskDone}/{subtaskTotal} subtasks · {task.hours || 0}h
             </div>
@@ -487,15 +639,15 @@ function TaskRow({ task, project, bar, isHovered, onMouseEnter, onMouseLeave, ar
       </div>
 
       {/* Gantt bar */}
-      <div className="flex-1 relative" style={{ height: '36px' }}>
+      <div className="flex-1 relative" style={{ height: nested ? '30px' : '36px' }}>
         <div
           className="absolute cursor-pointer transition-all duration-150 flex items-center overflow-hidden"
           style={{
-            top: '10px',
-            height: '16px',
+            top: nested ? '9px' : '10px',
+            height: barHeight,
             left: bar.left,
             width: bar.width,
-            borderRadius: '4px',
+            borderRadius: nested ? '3px' : '4px',
             backgroundColor: archived ? 'rgba(139,145,160,0.12)' : task.status === 'Done' ? `${project.color}30` : `${project.color}60`,
             border: archived
               ? '1px solid rgba(139,145,160,0.15)'
@@ -508,7 +660,7 @@ function TaskRow({ task, project, bar, isHovered, onMouseEnter, onMouseLeave, ar
           }}
         >
           {/* Subtask progress inside bar */}
-          {!archived && subtaskTotal > 0 && (
+          {!archived && !nested && subtaskTotal > 0 && (
             <div
               className="absolute left-0 top-0 bottom-0"
               style={{
@@ -521,7 +673,7 @@ function TaskRow({ task, project, bar, isHovered, onMouseEnter, onMouseLeave, ar
           <span
             className="relative z-[1] truncate"
             style={{
-              fontSize: '10px',
+              fontSize: nested ? '9px' : '10px',
               fontWeight: 600,
               color: archived ? '#6B7080' : '#F7F8FA',
             }}

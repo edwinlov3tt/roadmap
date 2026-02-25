@@ -23,10 +23,7 @@ const statusColumns = [
 ];
 
 // Board context bar — same as PublicView
-const BoardContextBar = React.memo(({ projects }) => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [focusedStatus, setFocusedStatus] = useState(null);
-
+const BoardContextBar = React.memo(({ projects, focusedStatus, onFocusStatus, searchTerm, onSearchChange }) => {
   const kpis = useMemo(() => ({
     live: projects.filter(p => p.status === 'Live').length,
     beta: projects.filter(p => p.status === 'In Beta Testing').length,
@@ -36,8 +33,8 @@ const BoardContextBar = React.memo(({ projects }) => {
   }), [projects]);
 
   const focusStatus = (status) => {
-    setFocusedStatus(prev => prev === status ? null : status);
-    setSearchTerm('');
+    onFocusStatus(focusedStatus === status ? null : status);
+    onSearchChange('');
   };
 
   return (
@@ -45,7 +42,7 @@ const BoardContextBar = React.memo(({ projects }) => {
       <div className="flex items-center gap-2">
         {focusedStatus && (
           <button
-            onClick={() => setFocusedStatus(null)}
+            onClick={() => onFocusStatus(null)}
             className="glass-panel px-2.5 py-1.5 flex items-center gap-1.5 hover:bg-white/10 transition-colors cursor-pointer border border-white/20 text-xs"
           >
             <X className="size-3 text-text-muted" />
@@ -84,7 +81,7 @@ const BoardContextBar = React.memo(({ projects }) => {
           type="text"
           placeholder="Search projects..."
           value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
+          onChange={(e) => onSearchChange(e.target.value)}
           className="input-glass pl-10 w-full text-sm"
         />
       </div>
@@ -119,6 +116,8 @@ export const AdminDashboard = ({ onLogout }) => {
   const [weekOffset, setWeekOffset] = useState(0);
   const [selectedDay, setSelectedDay] = useState(new Date());
   const [searchTerm, setSearchTerm] = useState('');
+  const [boardSearch, setBoardSearch] = useState('');
+  const [focusedStatus, setFocusedStatus] = useState(null);
 
   // Admin state
   const [selectedProject, setSelectedProject] = useState(null);
@@ -305,13 +304,19 @@ export const AdminDashboard = ({ onLogout }) => {
           </div>
         </div>
       ) : (
-        <BoardContextBar projects={projects} />
+        <BoardContextBar
+          projects={projects}
+          focusedStatus={focusedStatus}
+          onFocusStatus={setFocusedStatus}
+          searchTerm={boardSearch}
+          onSearchChange={setBoardSearch}
+        />
       )}
 
       {/* View Content */}
-      <div className={`flex-1 min-h-0 ${view === 'board' ? 'overflow-hidden' : 'overflow-y-auto pr-6 md:pr-7'}`}>
+      <div className={`flex-1 min-h-0 ${view === 'board' ? 'overflow-hidden' : 'overflow-y-auto pr-6 md:pr-7 pb-8'}`}>
         {view === 'board' && (
-          <BoardView projects={projects} onProjectClick={handleProjectClick} />
+          <BoardView projects={projects} onProjectClick={handleProjectClick} focusedStatus={focusedStatus} searchTerm={boardSearch} />
         )}
         {view === 'timeline' && (
           <TimelineView weekDays={currentWeekDays} projects={timelineProjects} onProjectClick={handleProjectClick} searchTerm={searchTerm} />

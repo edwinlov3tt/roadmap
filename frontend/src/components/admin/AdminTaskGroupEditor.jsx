@@ -48,6 +48,7 @@ export const AdminTaskGroupEditor = ({ projectId, onSaved }) => {
           name: t.name,
           done: t.done,
           estimatedHours: t.estimatedHours || null,
+          startDate: t.startDate || null,
         })),
       }));
       const res = await axios.put(`${API_BASE}/api/projects/${projectId}/task-groups`, { taskGroups: payload });
@@ -94,7 +95,7 @@ export const AdminTaskGroupEditor = ({ projectId, onSaved }) => {
 
   // Task operations
   const addTask = (gi) => {
-    update(gs => { gs[gi].tasks.push({ name: '', done: false, estimatedHours: null }); return gs; });
+    update(gs => { gs[gi].tasks.push({ name: '', done: false, estimatedHours: null, startDate: null }); return gs; });
   };
 
   const removeTask = (gi, ti) => {
@@ -192,6 +193,22 @@ const GroupEditor = ({
   const completed = getGroupCompleted(group);
   const totalTasks = group.tasks.length;
   const milestoneColor = statusConfig[group.milestone]?.color || '#8B91A0';
+
+  // Derive group date range from child tasks when group has no explicit dates
+  const tasksWithDates = group.tasks.filter(t => t.startDate);
+  const derivedStart = !group.startDate && tasksWithDates.length > 0
+    ? tasksWithDates.reduce((min, t) => (!min || t.startDate < min) ? t.startDate : min, null)
+    : null;
+  const derivedEnd = !group.endDate && tasksWithDates.length > 0
+    ? tasksWithDates.reduce((max, t) => {
+        const taskStart = t.startDate?.split?.('T')?.[0] || t.startDate;
+        const daySpan = Math.max(1, Math.ceil((t.estimatedHours || 8) / 8));
+        const d = new Date(taskStart + 'T00:00:00');
+        d.setDate(d.getDate() + daySpan - 1);
+        const end = d.toISOString().split('T')[0];
+        return (!max || end > max) ? end : max;
+      }, null)
+    : null;
 
   return (
     <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden">
@@ -294,10 +311,16 @@ const GroupEditor = ({
               className="w-14 bg-transparent border border-white/[0.06] rounded px-1.5 py-0.5 text-zinc-400 text-[11px] focus:border-white/15 outline-none transition-colors"
               placeholder="hrs"
               min="0"
-              step="0.5"
+              step="0.25"
             />
             <span className="uppercase tracking-wider">hrs</span>
           </label>
+          {/* Show derived date range when group has no explicit dates but tasks do */}
+          {!group.startDate && !group.endDate && derivedStart && (
+            <span className="text-[10px] text-zinc-600 italic ml-1">
+              Derived: {derivedStart} → {derivedEnd}
+            </span>
+          )}
         </div>
       )}
 
@@ -310,9 +333,12 @@ const GroupEditor = ({
                 key={ti}
                 task={task}
                 milestoneColor={milestoneColor}
+                groupStartDate={group.startDate}
+                groupEndDate={group.endDate}
                 onToggle={() => onToggleTask(ti)}
                 onUpdateName={(val) => onUpdateTask(ti, 'name', val)}
                 onUpdateHours={(val) => onUpdateTask(ti, 'estimatedHours', val)}
+                onUpdateStartDate={(val) => onUpdateTask(ti, 'startDate', val)}
                 onRemove={() => onRemoveTask(ti)}
               />
             ))}
@@ -327,7 +353,7 @@ const GroupEditor = ({
 };
 
 // ─── Single Task Row ───
-const TaskRow = ({ task, milestoneColor, onToggle, onUpdateName, onUpdateHours, onRemove }) => {
+const TaskRow = ({ task, milestoneColor, groupStartDate, groupEndDate, onToggle, onUpdateName, onUpdateHours, onUpdateStartDate, onRemove }) => {
   return (
     <div className="flex items-center gap-2 px-3.5 py-[5px] hover:bg-white/[0.02] transition-colors group">
       {/* Checkbox */}
@@ -357,6 +383,16 @@ const TaskRow = ({ task, milestoneColor, onToggle, onUpdateName, onUpdateHours, 
         placeholder="Task name..."
       />
 
+      {/* Start date */}
+      <input
+        type="date"
+        value={task.startDate ? String(task.startDate).split('T')[0] : ''}
+        onChange={(e) => onUpdateStartDate(e.target.value || null)}
+        min={groupStartDate ? String(groupStartDate).split('T')[0] : undefined}
+        max={groupEndDate ? String(groupEndDate).split('T')[0] : undefined}
+        className="bg-transparent border border-white/[0.04] rounded px-1.5 py-0.5 text-[11px] text-zinc-500 focus:border-white/15 outline-none opacity-0 group-hover:opacity-100 focus:opacity-100 transition-all"
+      />
+
       {/* Hours */}
       <input
         type="number"
@@ -365,7 +401,7 @@ const TaskRow = ({ task, milestoneColor, onToggle, onUpdateName, onUpdateHours, 
         className="w-12 bg-transparent border border-white/[0.04] rounded px-1.5 py-0.5 text-[11px] text-zinc-500 text-right focus:border-white/15 outline-none opacity-0 group-hover:opacity-100 focus:opacity-100 transition-all"
         placeholder="hrs"
         min="0"
-        step="0.5"
+        step="0.25"
       />
 
       {/* Delete */}

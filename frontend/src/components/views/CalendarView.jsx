@@ -50,26 +50,35 @@ function generateTimeBlocks(projects, weekDays) {
   const weekStart = weekDays[0];
   const weekEnd = weekDays[6];
 
-  // Collect active tasks from all projects
+  // Collect active tasks from all projects, drilling into group children
   const activeTasks = [];
   projects.forEach((project, pIdx) => {
     const color = blockColors[pIdx % blockColors.length];
-    (project.tasks || []).forEach((task) => {
-      if (task.status === 'Done') return;
-      const start = parseDate(task.startDate);
-      const end = parseDate(task.endDate);
-      // Only include tasks that overlap this week
-      if (end >= weekStart && start <= weekEnd) {
-        activeTasks.push({
-          taskId: task.id,
-          taskName: task.name,
-          projectName: project.name,
-          color,
-          hours: task.hours,
-          subtasks: task.subtasks || [],
-          status: task.status,
-        });
-      }
+    (project.tasks || []).forEach((taskOrGroup) => {
+      // If this is a group with children, schedule children individually
+      const items = taskOrGroup.isGroup && taskOrGroup.children?.length > 0
+        ? taskOrGroup.children.map(c => ({ ...c, groupName: taskOrGroup.name }))
+        : [taskOrGroup];
+
+      items.forEach((task) => {
+        if (task.status === 'Done') return;
+        const start = parseDate(task.startDate);
+        const end = parseDate(task.endDate);
+        // Only include tasks that overlap this week
+        if (end >= weekStart && start <= weekEnd) {
+          activeTasks.push({
+            taskId: task.id,
+            taskName: task.name,
+            groupName: task.groupName || null,
+            projectName: project.name,
+            color,
+            hours: task.hours,
+            startDate: task.startDate,
+            subtasks: task.subtasks || [],
+            status: task.status,
+          });
+        }
+      });
     });
   });
 
@@ -78,38 +87,90 @@ function generateTimeBlocks(projects, weekDays) {
     .map((d, i) => ({ date: d, dateStr: dateStr(d), dayIdx: i }))
     .filter((d) => d.date.getDay() !== 0 && d.date.getDay() !== 6);
 
-  let currentHour = 9; // Start at 9 AM
-  let dayIdx = 0;
+  // Track occupied hours per day for date-aware scheduling
+  const dayOccupied = {}; // dateStr -> nextAvailableHour
+  weekdaySlots.forEach(s => { dayOccupied[s.dateStr] = 9; });
 
-  activeTasks.forEach((task) => {
-    let remainingHours = Math.min(task.hours, 16); // Cap at 16h per task for display
+  // Separate tasks with specific start dates from those without
+  const datedTasks = activeTasks.filter(t => t.startDate);
+  const undatedTasks = activeTasks.filter(t => !t.startDate);
+
+  // Schedule dated tasks first — pin to their start date
+  datedTasks.forEach((task) => {
+    const taskDateStr = String(task.startDate).split('T')[0];
+    const slot = weekdaySlots.find(s => s.dateStr === taskDateStr);
+    if (!slot) return; // Task starts outside this week's weekdays
+
+    let remainingHours = Math.min(task.hours, 16);
     let blockNum = 0;
+    let currentHour = dayOccupied[slot.dateStr] || 9;
 
-    while (remainingHours > 0 && dayIdx < weekdaySlots.length) {
-      const slot = weekdaySlots[dayIdx];
-      const blockHours = Math.min(remainingHours, 18 - currentHour, 3); // Max 3h blocks, end by 6PM
-
-      if (blockHours >= 0.5) {
+    while (remainingHours > 0 && currentHour < 18) {
+      const blockHours = Math.min(remainingHours, 18 - currentHour, 3);
+      if (blockHours >= 0.25) {
         blocks.push({
           taskId: task.taskId,
           date: slot.dateStr,
           startHour: currentHour,
           endHour: currentHour + blockHours,
-          label: `${task.projectName} – ${task.taskName}`,
+          label: task.groupName ? `${task.groupName}: ${task.taskName}` : `${task.projectName} – ${task.taskName}`,
           projectName: task.projectName,
           color: task.color,
           subtasks: blockNum === 0 ? task.subtasks : [],
           status: task.status,
         });
         remainingHours -= blockHours;
-        currentHour += blockHours + 0.5; // 30min gap between blocks
+        currentHour += blockHours + 0.5;
+        blockNum++;
+      } else {
+        break;
+      }
+    }
+    dayOccupied[slot.dateStr] = Math.max(dayOccupied[slot.dateStr] || 9, currentHour);
+  });
+
+  // Schedule undated tasks sequentially (existing behavior)
+  let currentHour = 9;
+  let dayIdx = 0;
+  // Find first day with available time
+  while (dayIdx < weekdaySlots.length) {
+    const ds = weekdaySlots[dayIdx].dateStr;
+    if ((dayOccupied[ds] || 9) < 17.5) {
+      currentHour = dayOccupied[ds] || 9;
+      break;
+    }
+    dayIdx++;
+  }
+
+  undatedTasks.forEach((task) => {
+    let remainingHours = Math.min(task.hours, 16);
+    let blockNum = 0;
+
+    while (remainingHours > 0 && dayIdx < weekdaySlots.length) {
+      const slot = weekdaySlots[dayIdx];
+      const blockHours = Math.min(remainingHours, 18 - currentHour, 3);
+
+      if (blockHours >= 0.25) {
+        blocks.push({
+          taskId: task.taskId,
+          date: slot.dateStr,
+          startHour: currentHour,
+          endHour: currentHour + blockHours,
+          label: task.groupName ? `${task.groupName}: ${task.taskName}` : `${task.projectName} – ${task.taskName}`,
+          projectName: task.projectName,
+          color: task.color,
+          subtasks: blockNum === 0 ? task.subtasks : [],
+          status: task.status,
+        });
+        remainingHours -= blockHours;
+        currentHour += blockHours + 0.5;
         blockNum++;
       }
 
       // Move to next day if past 5:30 PM
       if (currentHour >= 17.5) {
         dayIdx++;
-        currentHour = 9;
+        currentHour = dayIdx < weekdaySlots.length ? (dayOccupied[weekdaySlots[dayIdx]?.dateStr] || 9) : 9;
       }
     }
   });

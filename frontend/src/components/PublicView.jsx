@@ -23,10 +23,7 @@ const statusColumns = [
 ];
 
 // Board context bar with status chips and search (memoized to prevent recreation)
-const BoardContextBar = React.memo(({ projects }) => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [focusedStatus, setFocusedStatus] = useState(null);
-
+const BoardContextBar = React.memo(({ projects, focusedStatus, onFocusStatus, searchTerm, onSearchChange }) => {
   // Memoize KPI calculation to avoid filtering on every render
   const kpis = useMemo(() => ({
     live: projects.filter(p => p.status === 'Live').length,
@@ -37,12 +34,8 @@ const BoardContextBar = React.memo(({ projects }) => {
   }), [projects]);
 
   const focusStatus = (status) => {
-    if (focusedStatus === status) {
-      setFocusedStatus(null);
-    } else {
-      setFocusedStatus(status);
-    }
-    setSearchTerm('');
+    onFocusStatus(focusedStatus === status ? null : status);
+    onSearchChange('');
   };
 
   return (
@@ -50,7 +43,7 @@ const BoardContextBar = React.memo(({ projects }) => {
       <div className="flex items-center gap-2">
         {focusedStatus && (
           <button
-            onClick={() => setFocusedStatus(null)}
+            onClick={() => onFocusStatus(null)}
             className="glass-panel px-2.5 py-1.5 flex items-center gap-1.5 hover:bg-white/10 transition-colors cursor-pointer border border-white/20 text-xs"
           >
             <X className="size-3 text-text-muted" />
@@ -94,7 +87,7 @@ const BoardContextBar = React.memo(({ projects }) => {
           type="text"
           placeholder="Search projects..."
           value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
+          onChange={(e) => onSearchChange(e.target.value)}
           className="input-glass pl-10 w-full text-sm"
         />
       </div>
@@ -133,6 +126,8 @@ export const PublicView = () => {
   const [weekOffset, setWeekOffset] = useState(0); // For timeline/calendar week navigation
   const [selectedDay, setSelectedDay] = useState(new Date()); // For calendar
   const [searchTerm, setSearchTerm] = useState('');
+  const [boardSearch, setBoardSearch] = useState('');
+  const [focusedStatus, setFocusedStatus] = useState(null);
 
   useEffect(() => {
     fetchProjects();
@@ -279,15 +274,23 @@ export const PublicView = () => {
           </div>
         </div>
       ) : (
-        <BoardContextBar projects={projects} />
+        <BoardContextBar
+          projects={projects}
+          focusedStatus={focusedStatus}
+          onFocusStatus={setFocusedStatus}
+          searchTerm={boardSearch}
+          onSearchChange={setBoardSearch}
+        />
       )}
 
       {/* View Content */}
-      <div className={`flex-1 min-h-0 ${view === 'board' ? 'overflow-hidden' : 'overflow-y-auto pr-6 md:pr-7'}`}>
+      <div className={`flex-1 min-h-0 ${view === 'board' ? 'overflow-hidden' : 'overflow-y-auto pr-6 md:pr-7 pb-8'}`}>
         {view === 'board' && (
           <BoardView
             projects={projects}
             onProjectClick={handleProjectClick}
+            focusedStatus={focusedStatus}
+            searchTerm={boardSearch}
           />
         )}
 

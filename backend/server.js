@@ -452,6 +452,13 @@ const initTables = async () => {
 
     await pool.query(`
       ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS estimated_hours NUMERIC(6,1);
+      ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS start_date DATE;
+    `);
+
+    // Upgrade precision for quarter-hour increments (0.25h)
+    await pool.query(`
+      ALTER TABLE project_task_groups ALTER COLUMN estimated_hours TYPE NUMERIC(6,2);
+      ALTER TABLE project_tasks ALTER COLUMN estimated_hours TYPE NUMERIC(6,2);
     `);
 
     // Project milestones for timeline markers
@@ -714,7 +721,7 @@ app.get('/api/projects/:id/task-groups', adminAuth, async (req, res) => {
       SELECT tg.id, tg.project_id, tg.name, tg.milestone, tg.sort_order,
              tg.start_date, tg.end_date, tg.estimated_hours,
              json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours, 'startDate', t.start_date)
                ORDER BY t.sort_order
              ) FILTER (WHERE t.id IS NOT NULL) as tasks
       FROM project_task_groups tg
@@ -748,6 +755,22 @@ app.put('/api/projects/:id/task-groups', adminAuth, async (req, res) => {
     const projectId = req.params.id;
     const { taskGroups } = req.body;
 
+    // Validate task date boundaries
+    for (const group of (taskGroups || [])) {
+      if (group.startDate && group.endDate && group.tasks) {
+        for (const task of group.tasks) {
+          if (task.startDate) {
+            if (task.startDate < group.startDate || task.startDate > group.endDate) {
+              client.release();
+              return res.status(400).json({
+                error: `Task "${task.name}" start date must fall within group "${group.name}" date range (${group.startDate} – ${group.endDate})`
+              });
+            }
+          }
+        }
+      }
+    }
+
     await client.query('BEGIN');
 
     // Delete existing groups (cascades to tasks)
@@ -767,9 +790,9 @@ app.put('/api/projects/:id/task-groups', adminAuth, async (req, res) => {
         for (let j = 0; j < group.tasks.length; j++) {
           const task = group.tasks[j];
           await client.query(
-            `INSERT INTO project_tasks (task_group_id, name, done, sort_order, completed_at, estimated_hours)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [groupId, task.name, task.done || false, j, task.done ? new Date() : null, task.estimatedHours || null]
+            `INSERT INTO project_tasks (task_group_id, name, done, sort_order, completed_at, estimated_hours, start_date)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [groupId, task.name, task.done || false, j, task.done ? new Date() : null, task.estimatedHours || null, task.startDate || null]
           );
         }
       }
@@ -828,7 +851,7 @@ app.put('/api/projects/:id/task-groups', adminAuth, async (req, res) => {
       SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
              tg.start_date, tg.end_date, tg.estimated_hours,
              json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours, 'startDate', t.start_date)
                ORDER BY t.sort_order
              ) FILTER (WHERE t.id IS NOT NULL) as tasks
       FROM project_task_groups tg
@@ -1441,7 +1464,7 @@ app.get('/api/public/projects', async (req, res) => {
       SELECT tg.id, tg.project_id, tg.name, tg.milestone, tg.sort_order,
              tg.start_date, tg.end_date, tg.estimated_hours,
              json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours, 'startDate', t.start_date)
                ORDER BY t.sort_order
              ) FILTER (WHERE t.id IS NOT NULL) as tasks
       FROM project_task_groups tg
@@ -1551,7 +1574,7 @@ app.get('/api/v1/projects', apiAuth, async (req, res) => {
       SELECT tg.id, tg.project_id, tg.name, tg.milestone, tg.sort_order,
              tg.start_date, tg.end_date, tg.estimated_hours,
              json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours, 'startDate', t.start_date)
                ORDER BY t.sort_order
              ) FILTER (WHERE t.id IS NOT NULL) as tasks
       FROM project_task_groups tg
@@ -1639,7 +1662,7 @@ app.get('/api/v1/projects/:identifier', apiAuth, async (req, res) => {
       SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
              tg.start_date, tg.end_date, tg.estimated_hours,
              json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours, 'startDate', t.start_date)
                ORDER BY t.sort_order
              ) FILTER (WHERE t.id IS NOT NULL) as tasks
       FROM project_task_groups tg
@@ -1907,7 +1930,7 @@ app.get('/api/v1/projects/:identifier/task-groups', apiAuth, async (req, res) =>
       SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
              tg.start_date, tg.end_date, tg.estimated_hours,
              json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours, 'startDate', t.start_date)
                ORDER BY t.sort_order
              ) FILTER (WHERE t.id IS NOT NULL) as tasks
       FROM project_task_groups tg
@@ -1950,6 +1973,23 @@ app.put('/api/v1/projects/:identifier/task-groups', apiAuth, async (req, res) =>
       return res.status(400).json({ success: false, error: 'taskGroups must be an array' });
     }
 
+    // Validate task date boundaries
+    for (const group of taskGroups) {
+      if (group.startDate && group.endDate && group.tasks) {
+        for (const task of group.tasks) {
+          if (task.startDate) {
+            if (task.startDate < group.startDate || task.startDate > group.endDate) {
+              client.release();
+              return res.status(400).json({
+                success: false,
+                error: `Task "${task.name}" start date must fall within group "${group.name}" date range (${group.startDate} – ${group.endDate})`
+              });
+            }
+          }
+        }
+      }
+    }
+
     await client.query('BEGIN');
     await client.query('DELETE FROM project_task_groups WHERE project_id = $1', [project.id]);
 
@@ -1966,9 +2006,9 @@ app.put('/api/v1/projects/:identifier/task-groups', apiAuth, async (req, res) =>
         for (let j = 0; j < group.tasks.length; j++) {
           const task = group.tasks[j];
           await client.query(
-            `INSERT INTO project_tasks (task_group_id, name, done, sort_order, completed_at, estimated_hours)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [groupId, task.name, task.done || false, j, task.done ? new Date() : null, task.estimatedHours || null]
+            `INSERT INTO project_tasks (task_group_id, name, done, sort_order, completed_at, estimated_hours, start_date)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [groupId, task.name, task.done || false, j, task.done ? new Date() : null, task.estimatedHours || null, task.startDate || null]
           );
         }
       }
@@ -1981,7 +2021,7 @@ app.put('/api/v1/projects/:identifier/task-groups', apiAuth, async (req, res) =>
       SELECT tg.id, tg.name, tg.milestone, tg.sort_order,
              tg.start_date, tg.end_date, tg.estimated_hours,
              json_agg(
-               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours)
+               json_build_object('id', t.id, 'name', t.name, 'done', t.done, 'sort_order', t.sort_order, 'estimatedHours', t.estimated_hours, 'startDate', t.start_date)
                ORDER BY t.sort_order
              ) FILTER (WHERE t.id IS NOT NULL) as tasks
       FROM project_task_groups tg
