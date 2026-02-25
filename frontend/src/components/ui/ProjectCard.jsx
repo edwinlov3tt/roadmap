@@ -76,6 +76,7 @@ export const ProjectCard = React.forwardRef(({ project, onClick, view = 'board' 
             <MilestoneProgressBar
               project={project}
               onMilestoneClick={handleMilestoneClick}
+              currentPhaseOnly
             />
           )}
 

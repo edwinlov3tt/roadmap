@@ -83,5 +83,43 @@ export function buildProgressBlocks(project) {
   return blocks;
 }
 
+// ─── Current-phase helpers ───
+
+export function getCurrentPhase(project) {
+  return normalizeStatus(project.status);
+}
+
+export function getCurrentPhaseGroups(project) {
+  const phase = getCurrentPhase(project);
+  if (!project.taskGroups) return [];
+  return project.taskGroups.filter(g => g.milestone === phase);
+}
+
+export function getPhaseTotalTasks(project) {
+  return getCurrentPhaseGroups(project).reduce((s, g) => s + g.tasks.length, 0);
+}
+
+export function getPhaseCompletedTasks(project) {
+  return getCurrentPhaseGroups(project).reduce((s, g) => s + g.tasks.filter(t => t.done).length, 0);
+}
+
+export function buildPhaseProgressBlocks(project) {
+  const phase = getCurrentPhase(project);
+  const groups = getCurrentPhaseGroups(project);
+  const color = statusConfig[phase]?.color || '#8B91A0';
+  const blocks = [];
+
+  blocks.push({ type: 'cap', milestone: phase, position: 'start' });
+
+  groups.forEach((group, gi) => {
+    const originalIndex = project.taskGroups.indexOf(group);
+    group.tasks.forEach((task) => {
+      blocks.push({ type: 'task', done: task.done, color, milestone: phase, groupIndex: originalIndex });
+    });
+  });
+
+  return blocks;
+}
+
 // Re-export centralized date formatting
 export { formatDate } from '../utils/dateUtils';

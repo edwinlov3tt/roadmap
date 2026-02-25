@@ -2,15 +2,24 @@ import React from 'react';
 import {
   statusConfig,
   buildProgressBlocks,
+  buildPhaseProgressBlocks,
   getTotalTasks,
   getCompletedTasks,
+  getPhaseTotalTasks,
+  getPhaseCompletedTasks,
+  getCurrentPhase,
 } from '../../constants/statusConfig';
 
-export const MilestoneProgressBar = ({ project, onMilestoneClick, compact }) => {
-  const blocks = buildProgressBlocks(project);
-  const total = getTotalTasks(project);
-  const completed = getCompletedTasks(project);
+export const MilestoneProgressBar = ({ project, onMilestoneClick, compact, currentPhaseOnly }) => {
+  // Use current-phase filtering if requested and there are tasks in this phase
+  const phaseTotal = currentPhaseOnly ? getPhaseTotalTasks(project) : 0;
+  const usePhase = currentPhaseOnly && phaseTotal > 0;
+
+  const blocks = usePhase ? buildPhaseProgressBlocks(project) : buildProgressBlocks(project);
+  const total = usePhase ? phaseTotal : getTotalTasks(project);
+  const completed = usePhase ? getPhaseCompletedTasks(project) : getCompletedTasks(project);
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const phase = usePhase ? getCurrentPhase(project) : null;
 
   // Dynamic task width: use flex to fill space, with min-width for visibility
   const taskCount = blocks.filter(b => b.type === 'task').length;
@@ -23,6 +32,11 @@ export const MilestoneProgressBar = ({ project, onMilestoneClick, compact }) => 
         <span className="text-xs text-zinc-500">
           {completed}/{total} tasks
         </span>
+        {phase && (
+          <span className="text-[10px] text-zinc-600 ml-1">
+            {phase} phase
+          </span>
+        )}
         <span
           className="text-xs font-semibold"
           style={{ color: pct === 100 ? '#21C37A' : '#F7F8FA' }}
